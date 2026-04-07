@@ -157,7 +157,7 @@ python react_agent.py \
 Summarize unread emails, draft a social update from key highlights, and schedule follow-up reminders tomorrow at 10am.
 ```
 
-### Planned Tasks (illustrative)
+### Planned Tasks 
 ```json
 {
   "tasks": [
