@@ -1,6 +1,9 @@
 from typing import Any
+import csv
 import os
 import subprocess
+import zipfile
+from xml.sax.saxutils import escape
 import requests
 from mcp.server.fastmcp import FastMCP
 
@@ -110,6 +113,95 @@ def bash_execute(command: str, cwd: str | None = None, timeout_sec: int = 20) ->
             "stdout": exc.stdout or "",
             "stderr": exc.stderr or "",
         }
+
+@mcp.tool()
+def write_txt_file(path: str, content: str, append: bool = False) -> dict[str, Any]:
+    """
+    Creates or updates a UTF-8 text file.
+    """
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    mode = "a" if append else "w"
+    with open(abs_path, mode, encoding="utf-8") as file:
+        file.write(content)
+    return {
+        "ok": True,
+        "path": abs_path,
+        "bytes_written": len(content.encode("utf-8")),
+        "append": append,
+    }
+
+@mcp.tool()
+def write_csv_file(path: str, rows: list[list[Any]], header: list[str] | None = None) -> dict[str, Any]:
+    """
+    Creates a CSV file from row data.
+    """
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    with open(abs_path, "w", encoding="utf-8", newline="") as file:
+        writer = csv.writer(file)
+        if header:
+            writer.writerow(header)
+        for row in rows:
+            writer.writerow(row)
+    return {
+        "ok": True,
+        "path": abs_path,
+        "row_count": len(rows),
+        "has_header": bool(header),
+    }
+
+@mcp.tool()
+def write_docx_file(path: str, title: str, paragraphs: list[str]) -> dict[str, Any]:
+    """
+    Creates a minimal .docx file without external dependencies.
+    """
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+
+    def to_paragraph_xml(text: str) -> str:
+        return f"<w:p><w:r><w:t>{escape(text)}</w:t></w:r></w:p>"
+
+    title_xml = (
+        "<w:p>"
+        "<w:pPr><w:pStyle w:val=\"Title\"/></w:pPr>"
+        f"<w:r><w:t>{escape(title)}</w:t></w:r>"
+        "</w:p>"
+    )
+    body_xml = "".join(to_paragraph_xml(p) for p in paragraphs)
+
+    content_types = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>"""
+
+    rels = """<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>"""
+
+    document_xml = f"""<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>
+    {title_xml}
+    {body_xml}
+    <w:sectPr/>
+  </w:body>
+</w:document>"""
+
+    with zipfile.ZipFile(abs_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr("[Content_Types].xml", content_types)
+        archive.writestr("_rels/.rels", rels)
+        archive.writestr("word/document.xml", document_xml)
+
+    return {
+        "ok": True,
+        "path": abs_path,
+        "paragraph_count": len(paragraphs),
+        "title": title,
+    }
 
 if __name__ == "__main__":
     # Runs MCP server over stdio 
