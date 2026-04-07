@@ -1,5 +1,6 @@
 from typing import Any
 import csv
+import json
 import os
 import subprocess
 import zipfile
@@ -132,6 +133,23 @@ def write_txt_file(path: str, content: str, append: bool = False) -> dict[str, A
     }
 
 @mcp.tool()
+def write_markdown_file(path: str, content: str, append: bool = False) -> dict[str, Any]:
+    """
+    Creates or updates a Markdown (.md) file.
+    """
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    mode = "a" if append else "w"
+    with open(abs_path, mode, encoding="utf-8") as file:
+        file.write(content)
+    return {
+        "ok": True,
+        "path": abs_path,
+        "bytes_written": len(content.encode("utf-8")),
+        "append": append,
+    }
+
+@mcp.tool()
 def write_csv_file(path: str, rows: list[list[Any]], header: list[str] | None = None) -> dict[str, Any]:
     """
     Creates a CSV file from row data.
@@ -149,6 +167,22 @@ def write_csv_file(path: str, rows: list[list[Any]], header: list[str] | None = 
         "path": abs_path,
         "row_count": len(rows),
         "has_header": bool(header),
+    }
+
+@mcp.tool()
+def write_json_file(path: str, data: Any, indent: int = 2) -> dict[str, Any]:
+    """
+    Creates a JSON file with pretty formatting.
+    """
+    abs_path = os.path.abspath(path)
+    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    with open(abs_path, "w", encoding="utf-8") as file:
+        json.dump(data, file, ensure_ascii=False, indent=indent)
+        file.write("\n")
+    return {
+        "ok": True,
+        "path": abs_path,
+        "indent": indent,
     }
 
 @mcp.tool()

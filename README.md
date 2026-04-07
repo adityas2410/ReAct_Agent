@@ -113,7 +113,7 @@ results = await asyncio.gather(*(agent.execute() for agent in subagents))
 Subagents call tools through `MCPToolClient`, which communicates with `mcp_server.py` over stdio.
 Each MCP tool can trigger an automation workflow (for example n8n webhooks).
 The MCP server also exposes `bash_execute` so subagents can run local shell commands for file navigation/CLI tasks.
-Additional MCP tools include `write_txt_file`, `write_csv_file`, and `write_docx_file` for document generation workflows.
+Additional MCP tools include `write_txt_file`, `write_markdown_file`, `write_csv_file`, `write_json_file`, and `write_docx_file` for document generation workflows.
 
 ---
 
