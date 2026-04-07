@@ -30,7 +30,7 @@ A Python CLI orchestrator where:
 flowchart TD
     U[User Prompt via CLI] --> O[AgentOrchestrator]
     O --> P[TaskPlanner]
-    P --> TP["Task Plan JSON tasks[]"]
+    P --> TP["Task Plan JSON (tasks)"]
 
     TP --> SA1[SubAgent A]
     TP --> SA2[SubAgent B]
@@ -66,9 +66,9 @@ flowchart TD
 
 ### 1) ModelRouter
 Routes model calls by task complexity:
-- `low` → Ollama small model (default `llama3`)
-- `medium` → Ollama larger model (default `mistral`)
-- `high` → OpenAI model (default `gpt-4o`)
+- `low` → Ollama small model (default `gemma3`)
+- `medium` → Ollama larger model (default `llama4`)
+- `high` → OpenAI model (default `gpt-5.2`)
 
 This allows local models for cheaper/faster simple tasks while escalating harder reasoning to OpenAI.
 
@@ -112,6 +112,7 @@ results = await asyncio.gather(*(agent.execute() for agent in subagents))
 ### 5) MCP integration
 Subagents call tools through `MCPToolClient`, which communicates with `mcp_server.py` over stdio.
 Each MCP tool can trigger an automation workflow (for example n8n webhooks).
+The MCP server also exposes `bash_execute` so subagents can run local shell commands for file navigation/CLI tasks.
 
 ---
 
@@ -139,9 +140,9 @@ python react_agent.py --prompt "Summarize unread emails and schedule follow-up t
 ```bash
 python react_agent.py \
   --prompt "Summarize unread emails and schedule follow-up tomorrow at 10am" \
-  --openai-model gpt-4o \
-  --ollama-small-model llama3 \
-  --ollama-large-model mistral \
+  --openai-model gpt-5.2 \
+  --ollama-small-model gemma3 \
+  --ollama-large-model llama4 \
   --ollama-base-url http://localhost:11434 \
   --mcp-server mcp_server.py \
   --max-subagent-steps 6
@@ -167,19 +168,20 @@ Summarize unread emails, draft a social update from key highlights, and schedule
 }
 ```
 
-### Model Routing Decisions 
-- Email subagent (`low`) → **Ollama / llama3**
-- Social subagent (`medium`) → **Ollama / mistral**
-- Calendar subagent (`high`) → **OpenAI / gpt-4o**
+### Model Routing Decisions (illustrative)
+- Email subagent (`low`) → **Ollama / gemma3**
+- Social subagent (`medium`) → **Ollama / llama4**
+- Calendar subagent (`high`) → **OpenAI / gpt-5.2**
 
-### Parallel Subagent Work 
+### Parallel Subagent Work (illustrative)
 - SubAgent(email) calls MCP tool: `email_process`
 - SubAgent(social) calls MCP tool: `social_post`
 - SubAgent(calendar) calls MCP tool: `calendar_schedule`
+- SubAgent(ops) can call MCP tool: `bash_execute`
 
 All run concurrently and return individual results.
 
-### Aggregated Final Output 
+### Aggregated Final Output (illustrative)
 ```text
 Done. I summarized your unread emails and highlighted urgent threads, drafted and posted a social update with the key highlights, and scheduled follow-up reminders for tomorrow at 10:00.
 ```

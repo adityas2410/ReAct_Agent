@@ -1,4 +1,6 @@
 from typing import Any
+import os
+import subprocess
 import requests
 from mcp.server.fastmcp import FastMCP
 
@@ -65,6 +67,49 @@ def daily_summary() -> dict[str, Any]:
     Triggers a daily automation workflow that can chain other workflows.
     """
     return call_n8n("daily-summary", {})
+
+@mcp.tool()
+def bash_execute(command: str, cwd: str | None = None, timeout_sec: int = 20) -> dict[str, Any]:
+    """
+    Executes a bash command and returns stdout/stderr/returncode.
+    Useful for file navigation and local CLI automation tasks.
+    """
+    target_cwd = os.path.abspath(cwd or os.getcwd())
+    if not os.path.isdir(target_cwd):
+        return {
+            "ok": False,
+            "error": f"Invalid cwd: {target_cwd}",
+            "command": command,
+        }
+
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=target_cwd,
+            shell=True,
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+            check=False,
+        )
+        return {
+            "ok": completed.returncode == 0,
+            "command": command,
+            "cwd": target_cwd,
+            "returncode": completed.returncode,
+            "stdout": completed.stdout,
+            "stderr": completed.stderr,
+        }
+    except subprocess.TimeoutExpired as exc:
+        return {
+            "ok": False,
+            "command": command,
+            "cwd": target_cwd,
+            "timed_out": True,
+            "timeout_sec": timeout_sec,
+            "stdout": exc.stdout or "",
+            "stderr": exc.stderr or "",
+        }
 
 if __name__ == "__main__":
     # Runs MCP server over stdio 

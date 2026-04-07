@@ -137,8 +137,8 @@ class ModelRouter:
         openai_client: OpenAI,
         openai_model: str,
         ollama_base_url: str = "http://localhost:11434",
-        ollama_small_model: str = "llama3",
-        ollama_large_model: str = "mistral",
+        ollama_small_model: str = "gemma3",
+        ollama_large_model: str = "llama4",
     ) -> None:
         self.openai_client = openai_client
         self.openai_model = openai_model
@@ -446,17 +446,17 @@ async def main() -> None:
     parser.add_argument("--prompt", required=True, help="User prompt to run through the orchestrator.")
     parser.add_argument(
         "--openai-model",
-        default=os.environ.get("OPENAI_MODEL", "gpt-4o"),
+        default=os.environ.get("OPENAI_MODEL", "gpt-5.2"),
         help="OpenAI model used for high-complexity routing.",
     )
     parser.add_argument(
         "--ollama-small-model",
-        default=os.environ.get("OLLAMA_SMALL_MODEL", "llama3"),
+        default=os.environ.get("OLLAMA_SMALL_MODEL", "gemma3"),
         help="Ollama model used for low-complexity routing.",
     )
     parser.add_argument(
         "--ollama-large-model",
-        default=os.environ.get("OLLAMA_LARGE_MODEL", "mistral"),
+        default=os.environ.get("OLLAMA_LARGE_MODEL", "llama4"),
         help="Ollama model used for medium-complexity routing.",
     )
     parser.add_argument(
