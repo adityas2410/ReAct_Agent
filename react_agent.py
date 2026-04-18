@@ -465,9 +465,20 @@ async def main() -> None:
         help="Base URL of Ollama API.",
     )
     parser.add_argument(
+        "--mcp-command",
+        default=os.environ.get("MCP_SERVER_COMMAND", sys.executable),
+        help="Command used to start MCP server process (e.g. python, docker).",
+    )
+    parser.add_argument(
+        "--mcp-args",
+        nargs="*",
+        default=None,
+        help="Optional explicit MCP command args. If provided, --mcp-server is ignored.",
+    )
+    parser.add_argument(
         "--mcp-server",
         default=os.environ.get("MCP_SERVER_PATH", "mcp_server.py"),
-        help="Path to FastMCP server file (stdio).",
+        help="Path to FastMCP server file when using python stdio mode.",
     )
     parser.add_argument(
         "--max-subagent-steps",
@@ -486,7 +497,10 @@ async def main() -> None:
         ollama_large_model=args.ollama_large_model,
     )
 
-    async with MCPToolClient(server_command=sys.executable, server_args=[args.mcp_server]) as mcp:
+    server_command = args.mcp_command
+    server_args = args.mcp_args if args.mcp_args is not None else [args.mcp_server]
+
+    async with MCPToolClient(server_command=server_command, server_args=server_args) as mcp:
         tool_specs = await mcp.list_tools()
         orchestrator = AgentOrchestrator(
             model_router=model_router,

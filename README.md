@@ -149,6 +149,32 @@ python react_agent.py \
   --max-subagent-steps 6
 ```
 
+### MCP command modes
+`react_agent.py` can launch MCP with any command:
+
+- Default python stdio mode:
+```bash
+python react_agent.py --prompt "..." --mcp-command python --mcp-server mcp_server.py
+```
+
+- Dockerized MCP mode:
+```bash
+python react_agent.py --prompt "..." \
+  --mcp-command docker \
+  --mcp-args run --rm -i react-mcp-server:latest
+```
+
+### Dockerize the MCP server
+Build image:
+```bash
+docker build -f Dockerfile.mcp -t react-mcp-server:latest .
+```
+
+Or via compose:
+```bash
+docker compose build mcp-server
+```
+
 ---
 
 ## End-to-End Example: Prompt → Routing → Parallel Subagents → Workflow

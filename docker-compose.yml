@@ -1,0 +1,8 @@
+services:
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    image: react-mcp-server:latest
+    stdin_open: true
+    tty: true
