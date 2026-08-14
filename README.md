@@ -168,17 +168,19 @@ skill proposal path, if one was generated
 
 ### Self-Evolving Skills
 
-The agent does not blindly rewrite its own Skills. Instead, each run can produce a skill update proposal.
+The agent does not blindly rewrite its own Skills. Instead, each run can produce a skill update proposal and ask for approval immediately.
 
 ```text
 1. Save run trace to memory/runs/
 2. Reflect on successful and failed steps
 3. Generate a JSON skill proposal
-4. Save proposal to skills/proposals/
-5. Apply only after review or approval
+4. Show the proposal in the CLI
+5. Ask whether to apply it
+6. If approved, update or create the Skill
+7. If rejected, delete the proposal
 ```
 
-Unsupported tasks automatically create `missing_capability` proposals. Normal runs may create `skill_update` proposals when the local model finds reusable learning in the trace.
+Unsupported tasks automatically create `missing_capability` proposals. Normal runs may create `skill_update` proposals when the local model finds reusable learning in the trace. Approved `skill_update` proposals append to `## Learned Updates` in the target Skill. Approved `missing_capability` proposals create a new `skills/<capability>/SKILL.md` stub. Rejected proposals are removed instead of accumulating.
 
 ### Langfuse Observability
 
@@ -255,7 +257,7 @@ CalendarSubAgent
   -> returns scheduling result
 ```
 
-Both subagents execute concurrently, then the orchestrator aggregates the final response, saves run memory, and may write a proposal under `skills/proposals/`.
+Both subagents execute concurrently, then the orchestrator aggregates the final response, saves run memory, and may ask for approval to apply a Skill proposal.
 
 ## CLI Usage
 

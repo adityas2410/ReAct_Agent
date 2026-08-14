@@ -13,6 +13,8 @@ import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from skill_proposal_applier import SkillProposalApplier
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -848,6 +850,7 @@ class AgentOrchestrator:
             skill_store=skill_store,
             skills_dir=str(skill_store.skills_dir),
         )
+        self.skill_proposal_applier = SkillProposalApplier(skills_dir=str(skill_store.skills_dir))
 
     async def run(self, prompt: str) -> str:
         tasks = self.planner.plan(prompt)
@@ -879,7 +882,14 @@ class AgentOrchestrator:
         if self.skill_evolution_enabled:
             proposal_path = self.skill_evolution.maybe_create_proposal(trace)
             if proposal_path:
-                trace["skill_proposal_path"] = proposal_path
+                review_result = self.skill_proposal_applier.review(proposal_path)
+                trace["skill_proposal_review"] = review_result
+                if review_result.get("status") == "applied":
+                    trace["skill_proposal_path"] = proposal_path
+                elif review_result.get("status") == "rejected_deleted":
+                    trace["deleted_skill_proposal_path"] = proposal_path
+                else:
+                    trace["skill_proposal_path"] = proposal_path
                 self.memory.save(trace)
 
         return final_answer
