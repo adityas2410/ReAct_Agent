@@ -4,6 +4,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -163,6 +164,14 @@ class ModelRouter:
         self.ollama_medium_model = ollama_medium_model
         self.ollama_large_model = ollama_large_model
 
+    def config(self) -> dict[str, str]:
+        return {
+            "ollama_base_url": self.ollama_base_url,
+            "ollama_small_model": self.ollama_small_model,
+            "ollama_medium_model": self.ollama_medium_model,
+            "ollama_large_model": self.ollama_large_model,
+        }
+
     def generate(self, messages: list[dict[str, str]], complexity: str) -> str:
         normalized = complexity.lower().strip()
         if normalized == "high":
@@ -226,6 +235,9 @@ class SkillStore:
     def planning_skills(self) -> list[Skill]:
         skill = self.get("task_planning")
         return [skill] if skill is not None else []
+
+    def evolution_skill(self) -> Skill | None:
+        return self.get("skill_evolution")
 
     def _score_skill(self, skill: Skill, primary_context: str, secondary_context: str) -> int:
         score = 0
@@ -376,6 +388,172 @@ class CapabilityRouter:
         return {token for token in raw_tokens if len(token) >= 3 and token not in stopwords}
 
 
+class RunMemory:
+    """
+    Saves run traces under memory/runs.
+    """
+
+    def __init__(self, memory_dir: str = "memory") -> None:
+        self.memory_dir = Path(memory_dir)
+        self.runs_dir = self.memory_dir / "runs"
+
+    def new_run_id(self) -> str:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        return f"run_{timestamp}"
+
+    def run_path(self, run_id: str) -> Path:
+        return self.runs_dir / f"{run_id}.json"
+
+    def save(self, trace: dict[str, Any]) -> str:
+        self.runs_dir.mkdir(parents=True, exist_ok=True)
+        path = self.run_path(str(trace["run_id"]))
+        path.write_text(json.dumps(trace, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return str(path)
+
+
+class SkillEvolution:
+    """
+    Generates proposal JSON from run traces without editing real Skills.
+    """
+
+    def __init__(self, model_router: ModelRouter, skill_store: SkillStore, skills_dir: str = "skills") -> None:
+        self.model_router = model_router
+        self.skill_store = skill_store
+        self.proposals_dir = Path(skills_dir) / "proposals"
+
+    def maybe_create_proposal(self, trace: dict[str, Any]) -> str | None:
+        proposal = self._missing_capability_proposal(trace)
+        if proposal is None:
+            proposal = self._model_proposal(trace)
+
+        if proposal is None:
+            return None
+
+        return self._save_proposal(trace, proposal)
+
+    def _missing_capability_proposal(self, trace: dict[str, Any]) -> dict[str, Any] | None:
+        unsupported = [
+            result for result in trace.get("subagent_results", [])
+            if result.get("status") == "unsupported"
+        ]
+        if not unsupported:
+            return None
+
+        capabilities = sorted({str(item.get("agent_type", "general")) for item in unsupported})
+        reason = "Unsupported task(s) were requested without a matching Skill or MCP tool."
+        suggested_change = (
+            "Add Skill and MCP coverage for: "
+            f"{', '.join(capabilities)}. Keep reasoning in the Skill and execution in MCP."
+        )
+        return self._normalize_proposal(
+            {
+                "type": "missing_capability",
+                "skill": capabilities[0] if capabilities else "general",
+                "reason": reason,
+                "suggested_change": suggested_change,
+                "source_run": trace["run_path"],
+                "status": "proposed",
+            },
+            trace,
+        )
+
+    def _model_proposal(self, trace: dict[str, Any]) -> dict[str, Any] | None:
+        evolution_skill = self.skill_store.evolution_skill()
+        compact_trace = self._compact_trace(trace)
+        prompt = (
+            "You propose reusable Skill improvements for a local ReAct agent.\n"
+            "Return only JSON with this schema:\n"
+            "{\"should_update\":true|false,\"type\":\"skill_update\","
+            "\"skill\":\"skill_name\",\"reason\":\"...\","
+            "\"suggested_change\":\"...\"}\n"
+            "Do not propose direct edits to files. Propose only small reusable instruction changes.\n\n"
+            f"Skill evolution procedure:\n{evolution_skill.body if evolution_skill else 'No skill_evolution Skill available.'}\n\n"
+            f"Run trace summary:\n{json.dumps(compact_trace, ensure_ascii=False)}"
+        )
+        messages = [
+            {"role": "system", "content": "You produce strict JSON skill proposal decisions."},
+            {"role": "user", "content": prompt},
+        ]
+
+        try:
+            raw = self.model_router.generate(messages=messages, complexity="high")
+            data = self._extract_json(raw)
+        except Exception:
+            return None
+
+        if not data.get("should_update"):
+            return None
+
+        return self._normalize_proposal(data, trace)
+
+    def _compact_trace(self, trace: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "prompt": trace.get("prompt"),
+            "tasks": trace.get("planned_tasks", []),
+            "selected_skills": sorted({
+                skill
+                for result in trace.get("subagent_results", [])
+                for skill in result.get("selected_skills", [])
+            }),
+            "statuses": [
+                {
+                    "agent_type": result.get("agent_type"),
+                    "status": result.get("status"),
+                    "result": result.get("result"),
+                }
+                for result in trace.get("subagent_results", [])
+            ],
+            "failed_steps": [
+                {
+                    "agent_type": result.get("agent_type"),
+                    "steps": [
+                        step for step in result.get("steps", [])
+                        if "error" in step or "tool_error" in step or "unavailable_tool" in step
+                    ],
+                }
+                for result in trace.get("subagent_results", [])
+                if any(
+                    "error" in step or "tool_error" in step or "unavailable_tool" in step
+                    for step in result.get("steps", [])
+                )
+            ],
+        }
+
+    def _normalize_proposal(self, data: dict[str, Any], trace: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": str(data.get("type") or "skill_update"),
+            "skill": str(data.get("skill") or "general"),
+            "reason": str(data.get("reason") or "Reusable behavior was observed in the run."),
+            "suggested_change": str(data.get("suggested_change") or data.get("patch") or "Review this run for a reusable Skill update."),
+            "source_run": str(data.get("source_run") or trace["run_path"]),
+            "status": "proposed",
+        }
+
+    def _save_proposal(self, trace: dict[str, Any], proposal: dict[str, Any]) -> str:
+        self.proposals_dir.mkdir(parents=True, exist_ok=True)
+        path = self.proposals_dir / f"{trace['run_id']}_{proposal['type']}.json"
+        path.write_text(json.dumps(proposal, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        return str(path)
+
+    def _extract_json(self, raw: str) -> dict[str, Any]:
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                return loaded
+        except json.JSONDecodeError:
+            pass
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise ValueError("Model output did not contain JSON")
+
+        loaded = json.loads(raw[start : end + 1])
+        if not isinstance(loaded, dict):
+            raise ValueError("Proposal JSON root must be an object")
+        return loaded
+
+
 class TaskPlanner:
     """
     Creates a structured task plan from the user prompt.
@@ -486,28 +664,39 @@ class SubAgent:
             return self._result(
                 status="unsupported",
                 result=self.route.unsupported_reason or "Unsupported task.",
+                steps=[],
             )
 
         history: list[dict[str, str]] = []
+        steps: list[dict[str, Any]] = []
         user_input = self.task.instruction
 
-        for _ in range(self.max_steps):
+        for step_number in range(1, self.max_steps + 1):
+            step: dict[str, Any] = {"step": step_number, "input": user_input}
             try:
                 response = self._chat(user_input=user_input, history=history)
                 parsed_type, parsed_payload = self._parse_model_output(response)
+                step["model_output"] = response
+                step["parsed_type"] = parsed_type
             except Exception as exc:
+                step["error"] = f"{type(exc).__name__}: {exc}"
                 user_input = (
                     f"Your previous response could not be parsed: {type(exc).__name__}: {exc}.\n"
                     "Respond with exactly one valid Action or Final message."
                 )
+                step["recovery_prompt"] = user_input
+                steps.append(step)
                 continue
 
             if parsed_type == "final":
-                return self._result(status="completed", result=parsed_payload)
+                step["final"] = parsed_payload
+                steps.append(step)
+                return self._result(status="completed", result=parsed_payload, steps=steps)
 
             action = parsed_payload
             tool_name = action["tool"]
             arguments = action.get("arguments", {})
+            step["action"] = action
 
             history.append({"role": "assistant", "content": response})
 
@@ -517,6 +706,9 @@ class SubAgent:
                     f"Available tools: {', '.join(sorted(self.tool_index.keys())) or 'none'}.\n"
                     "Respond with one available Action or a Final message."
                 )
+                step["unavailable_tool"] = tool_name
+                step["recovery_prompt"] = user_input
+                steps.append(step)
                 continue
 
             try:
@@ -526,15 +718,21 @@ class SubAgent:
                     f"Observation from MCP tool '{tool_name}': {observation}\n"
                     "Continue with another Action if needed, otherwise return Final."
                 )
+                step["observation"] = tool_output
+                step["next_prompt"] = user_input
             except Exception as exc:
                 user_input = (
                     f"MCP tool call failed for '{tool_name}': {type(exc).__name__}: {exc}\n"
                     "Use the error recovery Skill if available, then recover with another Action or return Final."
                 )
+                step["tool_error"] = f"{type(exc).__name__}: {exc}"
+                step["recovery_prompt"] = user_input
 
-        return self._result(status="failed", result="Subagent reached max steps without Final output.")
+            steps.append(step)
 
-    def _result(self, status: str, result: Any) -> dict[str, Any]:
+        return self._result(status="failed", result="Subagent reached max steps without Final output.", steps=steps)
+
+    def _result(self, status: str, result: Any, steps: list[dict[str, Any]]) -> dict[str, Any]:
         return {
             "agent_type": self.task.agent_type,
             "instruction": self.task.instruction,
@@ -543,6 +741,7 @@ class SubAgent:
             "available_tools": [tool.name for tool in self.tools],
             "status": status,
             "result": result,
+            "steps": steps,
         }
 
     def _chat(self, user_input: str, history: list[dict[str, str]]) -> str:
@@ -622,6 +821,7 @@ class AgentOrchestrator:
       3) Spawn subagents dynamically
       4) Execute subagents concurrently
       5) Aggregate results
+      6) Save memory and propose Skill updates
     """
 
     def __init__(
@@ -631,6 +831,8 @@ class AgentOrchestrator:
         tools: list[ToolSpec],
         skill_store: SkillStore,
         max_subagent_steps: int,
+        memory_dir: str,
+        skill_evolution_enabled: bool,
     ) -> None:
         self.skill_store = skill_store
         self.planner = TaskPlanner(model_router=model_router, skill_store=skill_store)
@@ -639,22 +841,82 @@ class AgentOrchestrator:
         self.tools = tools
         self.capability_router = CapabilityRouter(skill_store=skill_store, tools=tools)
         self.max_subagent_steps = max_subagent_steps
+        self.memory = RunMemory(memory_dir=memory_dir)
+        self.skill_evolution_enabled = skill_evolution_enabled
+        self.skill_evolution = SkillEvolution(
+            model_router=model_router,
+            skill_store=skill_store,
+            skills_dir=str(skill_store.skills_dir),
+        )
 
     async def run(self, prompt: str) -> str:
         tasks = self.planner.plan(prompt)
+        routes = [self.capability_router.resolve(prompt=prompt, task=task) for task in tasks]
         subagents = [
             SubAgent(
                 task=task,
                 model_router=self.model_router,
-                route=self.capability_router.resolve(prompt=prompt, task=task),
+                route=route,
                 mcp_client=self.mcp_client,
                 max_steps=self.max_subagent_steps,
             )
-            for task in tasks
+            for task, route in zip(tasks, routes)
         ]
 
         results = await asyncio.gather(*(agent.execute() for agent in subagents))
-        return self._aggregate(prompt=prompt, tasks=tasks, results=results)
+        final_answer = self._aggregate(prompt=prompt, tasks=tasks, results=results)
+        trace = self._build_trace(
+            prompt=prompt,
+            tasks=tasks,
+            routes=routes,
+            results=results,
+            final_answer=final_answer,
+        )
+        run_path = self.memory.save(trace)
+        trace["run_path"] = run_path
+        self.memory.save(trace)
+
+        if self.skill_evolution_enabled:
+            proposal_path = self.skill_evolution.maybe_create_proposal(trace)
+            if proposal_path:
+                trace["skill_proposal_path"] = proposal_path
+                self.memory.save(trace)
+
+        return final_answer
+
+    def _build_trace(
+        self,
+        prompt: str,
+        tasks: list[TaskPlanItem],
+        routes: list[CapabilityRoute],
+        results: list[dict[str, Any]],
+        final_answer: str,
+    ) -> dict[str, Any]:
+        run_id = self.memory.new_run_id()
+        run_path = str(self.memory.run_path(run_id))
+        return {
+            "run_id": run_id,
+            "run_path": run_path,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "prompt": prompt,
+            "model_config": self.model_router.config(),
+            "mcp_tools": [tool.name for tool in self.tools],
+            "planned_tasks": [
+                {
+                    "agent_type": task.agent_type,
+                    "instruction": task.instruction,
+                    "complexity": task.complexity,
+                    "route_mode": route.mode,
+                    "selected_skills": [skill.name for skill in route.skills],
+                    "available_tools": [tool.name for tool in route.tools],
+                    "unsupported_reason": route.unsupported_reason,
+                }
+                for task, route in zip(tasks, routes)
+            ],
+            "subagent_results": results,
+            "unsupported_tasks": [result for result in results if result.get("status") == "unsupported"],
+            "final_answer": final_answer,
+        }
 
     def _aggregate(self, prompt: str, tasks: list[TaskPlanItem], results: list[dict[str, Any]]) -> str:
         tasks_json = [
@@ -718,6 +980,16 @@ async def main() -> None:
         help="Directory containing markdown Skills as */SKILL.md.",
     )
     parser.add_argument(
+        "--memory-dir",
+        default=os.environ.get("MEMORY_DIR", "memory"),
+        help="Directory where run traces are saved.",
+    )
+    parser.add_argument(
+        "--disable-skill-evolution",
+        action="store_true",
+        help="Disable proposal-only Skill evolution after each run.",
+    )
+    parser.add_argument(
         "--mcp-command",
         default=os.environ.get("MCP_SERVER_COMMAND", sys.executable),
         help="Command used to start MCP server process (e.g. python, docker).",
@@ -760,6 +1032,8 @@ async def main() -> None:
             tools=tool_specs,
             skill_store=skill_store,
             max_subagent_steps=args.max_subagent_steps,
+            memory_dir=args.memory_dir,
+            skill_evolution_enabled=not args.disable_skill_evolution,
         )
         final_answer = await orchestrator.run(prompt=args.prompt)
         print(final_answer)
