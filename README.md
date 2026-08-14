@@ -109,7 +109,7 @@ This preserves a local-first design while still allowing different models to be 
 
 Skills are markdown procedures stored under `skills/`.
 
-Example:
+Current Skills:
 
 ```text
 skills/
@@ -119,7 +119,6 @@ skills/
   calendar_reasoning/SKILL.md
   social_content/SKILL.md
   error_recovery/SKILL.md
-  skill_evolution/SKILL.md
 ```
 
 Skills do not duplicate MCP workflows. They teach the agent how to approach a task, choose fields, recover from errors, and decide when a tool call is needed.
@@ -155,7 +154,7 @@ The agent does not blindly rewrite its own Skills. Instead, each run can produce
 5. Apply only after review or approval
 ```
 
-This gives the system a safe evolution path without corrupting core instructions.
+This gives the system a safe evolution path without corrupting core instructions. The proposal loop is planned as a follow-up phase after the initial SkillStore and capability router.
 
 ### Langfuse Observability
 
@@ -242,7 +241,7 @@ Basic run:
 python react_agent.py --prompt "Summarize unread emails and schedule follow-up tomorrow at 10am"
 ```
 
-With local model routing:
+With local model routing and Skills:
 
 ```bash
 python react_agent.py \
@@ -251,6 +250,7 @@ python react_agent.py \
   --ollama-medium-model llama3.1:8b \
   --ollama-large-model qwen2.5:14b \
   --ollama-base-url http://localhost:11434 \
+  --skills-dir skills \
   --mcp-server mcp_server.py \
   --max-subagent-steps 6
 ```
@@ -262,6 +262,7 @@ docker build -f Dockerfile.mcp -t react-mcp-server:latest .
 
 python react_agent.py \
   --prompt "Generate a markdown report from my email summary" \
+  --skills-dir skills \
   --mcp-command docker \
   --mcp-args run --rm -i react-mcp-server:latest
 ```
@@ -273,6 +274,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_SMALL_MODEL=llama3.2:3b
 OLLAMA_MEDIUM_MODEL=llama3.1:8b
 OLLAMA_LARGE_MODEL=qwen2.5:14b
+SKILLS_DIR=skills
 MCP_SERVER_PATH=mcp_server.py
 N8N_WEBHOOK_BASE=https://your-n8n-domain/webhook
 LANGFUSE_PUBLIC_KEY=
