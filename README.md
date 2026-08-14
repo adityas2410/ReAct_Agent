@@ -71,6 +71,9 @@ flowchart TD
     SA3 --> AGG
     AGG --> OUT[Final Answer]
 
+    O --> MEM[Run Memory]
+    MEM --> PROP[Skill Proposal]
+
     O --> LF[Langfuse Trace]
     SA1 --> LF
     SA2 --> LF
@@ -91,7 +94,7 @@ Observation: tool result
 Final: "task result"
 ```
 
-The loop repeats until the subagent returns `Final` or reaches the configured step limit.
+The loop repeats until the subagent returns `Final` or reaches the configured step limit. Each step is saved into the run trace with model output, parsed action, observation, errors, and recovery prompts.
 
 ### Local Model Routing
 
@@ -119,6 +122,7 @@ skills/
   calendar_reasoning/SKILL.md
   social_content/SKILL.md
   error_recovery/SKILL.md
+  skill_evolution/SKILL.md
 ```
 
 Skills do not duplicate MCP workflows. They teach the agent how to approach a task, choose fields, recover from errors, and decide when a tool call is needed.
@@ -142,6 +146,26 @@ write_docx_file
 
 These tools can trigger n8n workflows, call external APIs, write files, or run local commands inside a restricted workspace.
 
+### Run Memory
+
+Each CLI run saves one structured JSON trace under `memory/runs/`.
+
+The trace includes:
+
+```text
+prompt
+model config
+available MCP tools
+planned tasks
+selected skills
+available tools per subagent
+subagent statuses
+ReAct step history
+unsupported tasks
+final answer
+skill proposal path, if one was generated
+```
+
 ### Self-Evolving Skills
 
 The agent does not blindly rewrite its own Skills. Instead, each run can produce a skill update proposal.
@@ -154,7 +178,7 @@ The agent does not blindly rewrite its own Skills. Instead, each run can produce
 5. Apply only after review or approval
 ```
 
-This gives the system a safe evolution path without corrupting core instructions. The proposal loop is planned as a follow-up phase after the initial SkillStore and capability router.
+Unsupported tasks automatically create `missing_capability` proposals. Normal runs may create `skill_update` proposals when the local model finds reusable learning in the trace.
 
 ### Langfuse Observability
 
@@ -231,7 +255,7 @@ CalendarSubAgent
   -> returns scheduling result
 ```
 
-Both subagents execute concurrently, then the orchestrator aggregates the final response.
+Both subagents execute concurrently, then the orchestrator aggregates the final response, saves run memory, and may write a proposal under `skills/proposals/`.
 
 ## CLI Usage
 
@@ -241,7 +265,7 @@ Basic run:
 python react_agent.py --prompt "Summarize unread emails and schedule follow-up tomorrow at 10am"
 ```
 
-With local model routing and Skills:
+With local model routing, Skills, and memory:
 
 ```bash
 python react_agent.py \
@@ -251,8 +275,17 @@ python react_agent.py \
   --ollama-large-model qwen2.5:14b \
   --ollama-base-url http://localhost:11434 \
   --skills-dir skills \
+  --memory-dir memory \
   --mcp-server mcp_server.py \
   --max-subagent-steps 6
+```
+
+Disable proposal generation while still saving run memory:
+
+```bash
+python react_agent.py \
+  --prompt "Summarize unread emails" \
+  --disable-skill-evolution
 ```
 
 Dockerized MCP server:
@@ -263,6 +296,7 @@ docker build -f Dockerfile.mcp -t react-mcp-server:latest .
 python react_agent.py \
   --prompt "Generate a markdown report from my email summary" \
   --skills-dir skills \
+  --memory-dir memory \
   --mcp-command docker \
   --mcp-args run --rm -i react-mcp-server:latest
 ```
@@ -275,6 +309,7 @@ OLLAMA_SMALL_MODEL=llama3.2:3b
 OLLAMA_MEDIUM_MODEL=llama3.1:8b
 OLLAMA_LARGE_MODEL=qwen2.5:14b
 SKILLS_DIR=skills
+MEMORY_DIR=memory
 MCP_SERVER_PATH=mcp_server.py
 N8N_WEBHOOK_BASE=https://your-n8n-domain/webhook
 LANGFUSE_PUBLIC_KEY=
