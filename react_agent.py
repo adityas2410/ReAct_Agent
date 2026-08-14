@@ -97,10 +97,11 @@ class MCPToolClient:
         if self.session is None:
             raise RuntimeError("MCP session not initialized")
 
-        tools = await self.session.list_tools()
+        tool_result = await self.session.list_tools()
+        tool_items = getattr(tool_result, "tools", tool_result)
 
         specs: list[ToolSpec] = []
-        for t in tools:
+        for t in tool_items:
             name = getattr(t, "name", "")
             description = getattr(t, "description", "") or ""
             input_schema = getattr(t, "inputSchema", None) or {}
@@ -215,7 +216,7 @@ class SkillStore:
 
         for skill in self.load():
             score = 0
-            if skill.name.lower() in context:
+            if self._normalize_text(skill.name) in context:
                 score += 5
 
             for piece in skill.name.replace("_", " ").replace("-", " ").split():
@@ -223,7 +224,7 @@ class SkillStore:
                     score += 2
 
             for trigger in skill.triggers:
-                trigger_text = trigger.lower().strip()
+                trigger_text = self._normalize_text(trigger)
                 if trigger_text and trigger_text in context:
                     score += 3
 
