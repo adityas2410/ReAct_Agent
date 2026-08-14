@@ -211,24 +211,13 @@ class SkillStore:
         return None
 
     def select(self, prompt: str, task: TaskPlanItem, limit: int = 3) -> list[Skill]:
-        context = self._normalize_text(f"{prompt} {task.agent_type} {task.instruction}")
+        primary_context = self._normalize_text(f"{task.agent_type} {task.instruction}")
+        secondary_context = self._normalize_text(prompt)
         scored: list[tuple[int, Skill]] = []
 
         for skill in self.load():
-            score = 0
-            if self._normalize_text(skill.name) in context:
-                score += 5
-
-            for piece in skill.name.replace("_", " ").replace("-", " ").split():
-                if piece and piece.lower() in context:
-                    score += 2
-
-            for trigger in skill.triggers:
-                trigger_text = self._normalize_text(trigger)
-                if trigger_text and trigger_text in context:
-                    score += 3
-
-            if score > 0:
+            score = self._score_skill(skill, primary_context, secondary_context)
+            if score >= 5:
                 scored.append((score, skill))
 
         scored.sort(key=lambda item: (-item[0], item[1].name))
@@ -237,6 +226,30 @@ class SkillStore:
     def planning_skills(self) -> list[Skill]:
         skill = self.get("task_planning")
         return [skill] if skill is not None else []
+
+    def _score_skill(self, skill: Skill, primary_context: str, secondary_context: str) -> int:
+        score = 0
+        normalized_name = self._normalize_text(skill.name)
+        if normalized_name in primary_context:
+            score += 5
+        elif normalized_name in secondary_context:
+            score += 1
+
+        for piece in skill.name.replace("_", " ").replace("-", " ").split():
+            normalized_piece = self._normalize_text(piece)
+            if normalized_piece and normalized_piece in primary_context:
+                score += 2
+            elif normalized_piece and normalized_piece in secondary_context:
+                score += 1
+
+        for trigger in skill.triggers:
+            trigger_text = self._normalize_text(trigger)
+            if trigger_text and trigger_text in primary_context:
+                score += 3
+            elif trigger_text and trigger_text in secondary_context:
+                score += 1
+
+        return score
 
     def _load_skill(self, path: Path) -> Skill:
         raw = path.read_text(encoding="utf-8")
