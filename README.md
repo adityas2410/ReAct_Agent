@@ -1,222 +1,304 @@
-# ReAct AI Agent Orchestrator for Spawning Parallel Subagents with MCP
+# ReAct AI Agent Orchestrator
 
-Personal CLI AI agent using local/remote LLMs and **ReAct (Reasoning + Action)** with an MCP server for tool calling.
+Personal AI agent orchestrator built around local LLMs, ReAct loops, dynamic subagents, self-hosted MCP tools, and markdown Skills that improve from run experience.
 
-This project implements:
-- **Model routing** (Ollama for low/medium complexity, OpenAI for high complexity)
-- **Task planning** from a single user prompt
-- **Dynamic subagent spawning**
-- **Concurrent execution** of subagents via `asyncio.gather(...)`
-- **MCP tool calls** to run automated workflows (for example n8n-backed email/calendar/social actions)
+The project is designed for local-first automation: Ollama handles model inference, FastMCP exposes executable tools and workflows, Skills provide reusable task procedures, Docker isolates risky execution, and Langfuse records the full agent trace.
 
----
+## Stack
 
-## What this repo is
+- Python
+- Ollama
+- FastMCP
+- Markdown Skills
+- Langfuse
+- Docker
+- n8n-compatible workflow hooks
 
-A Python CLI orchestrator where:
-1. You provide one prompt.
-2. A planner creates structured sub-tasks.
-3. Subagents execute those tasks in parallel using ReAct loops.
-4. Subagents call MCP tools.
-5. Final output is aggregated into one user-facing response.
+## What It Does
 
-`mcp_server.py` exposes tool endpoints, and `react_agent.py` is the orchestrator runtime.
+A single user prompt is planned into smaller tasks, then executed by focused subagents running concurrently.
 
----
+Each subagent follows this routing order:
 
-## High-Level Architecture
+```text
+1. Check for a matching Skill
+2. Use the Skill as the task procedure
+3. Call MCP tools for execution when needed
+4. If no Skill or MCP tool exists, mark the task unsupported
+```
+
+This keeps the agent grounded: Skills define how the agent should work, while MCP tools perform real actions such as email processing, calendar scheduling, file generation, shell execution, or n8n workflow calls.
+
+## Architecture
 
 ```mermaid
 flowchart TD
-    U[User Prompt via CLI] --> O[AgentOrchestrator]
+    U[User Prompt] --> O[AgentOrchestrator]
     O --> P[TaskPlanner]
-    P --> TP["Task Plan JSON (tasks)"]
+    P --> T[Structured Task Plan]
 
-    TP --> SA1[SubAgent A]
-    TP --> SA2[SubAgent B]
-    TP --> SA3[SubAgent C]
+    T --> SA1[Email Subagent]
+    T --> SA2[Calendar Subagent]
+    T --> SA3[Social Subagent]
 
-    SA1 --> MR1[ModelRouter]
-    SA2 --> MR2[ModelRouter]
-    SA3 --> MR3[ModelRouter]
+    SA1 --> CR1[Capability Router]
+    SA2 --> CR2[Capability Router]
+    SA3 --> CR3[Capability Router]
 
-    MR1 -->|low/medium| OL1[Ollama]
-    MR2 -->|low/medium| OL2[Ollama]
-    MR3 -->|high| OA1[OpenAI]
+    CR1 --> SK1[Matching Skill]
+    CR2 --> SK2[Matching Skill]
+    CR3 --> SK3[Matching Skill]
 
-    SA1 --> MCP[MCPToolClient]
+    SK1 --> MR1[Local Model Router]
+    SK2 --> MR2[Local Model Router]
+    SK3 --> MR3[Local Model Router]
+
+    MR1 --> OL1[Ollama low model]
+    MR2 --> OL2[Ollama medium model]
+    MR3 --> OL3[Ollama high model]
+
+    SA1 --> MCP[MCP Tool Client]
     SA2 --> MCP
     SA3 --> MCP
 
-    MCP --> MS[mcp_server.py tools]
-    MS --> WF[n8n / external workflow actions]
-    WF --> SA1
-    WF --> SA2
-    WF --> SA3
+    MCP --> MS[FastMCP Server]
+    MS --> N8N[n8n workflows / APIs]
+    MS --> FS[File tools]
+    MS --> SH[Sandboxed shell]
 
     SA1 --> AGG[Final Aggregation]
     SA2 --> AGG
     SA3 --> AGG
     AGG --> OUT[Final Answer]
+
+    O --> LF[Langfuse Trace]
+    SA1 --> LF
+    SA2 --> LF
+    SA3 --> LF
+    MCP --> LF
 ```
 
----
+## Core Concepts
 
-## Core Components
+### ReAct Agent Loop
 
-### 1) ModelRouter
-Routes model calls by task complexity:
-- `low` → Ollama small model (default `gemma3`)
-- `medium` → Ollama larger model (default `llama4`)
-- `high` → OpenAI model (default `gpt-5.2`)
+Each subagent runs a Reasoning + Action loop:
 
-This allows local models for cheaper/faster simple tasks while escalating harder reasoning to OpenAI.
+```text
+Thought is handled by the model context.
+Action: {"tool":"tool_name","arguments":{},"reason":"why this tool is needed"}
+Observation: tool result
+Final: "task result"
+```
 
-### 2) TaskPlanner
-Generates a structured plan before execution:
+The loop repeats until the subagent returns `Final` or reaches the configured step limit.
+
+### Local Model Routing
+
+The router maps task complexity to local Ollama models:
+
+```text
+low    -> small local model
+medium -> balanced local model
+high   -> strongest local model
+```
+
+This preserves a local-first design while still allowing different models to be used for different task difficulty levels.
+
+### Skills
+
+Skills are markdown procedures stored under `skills/`.
+
+Example:
+
+```text
+skills/
+  task_planning/SKILL.md
+  react_execution/SKILL.md
+  email_reasoning/SKILL.md
+  calendar_reasoning/SKILL.md
+  social_content/SKILL.md
+  error_recovery/SKILL.md
+  skill_evolution/SKILL.md
+```
+
+Skills do not duplicate MCP workflows. They teach the agent how to approach a task, choose fields, recover from errors, and decide when a tool call is needed.
+
+### MCP Tools
+
+MCP is the execution layer. The FastMCP server exposes tools such as:
+
+```text
+email_process
+calendar_schedule
+social_post
+daily_summary
+bash_execute
+write_txt_file
+write_markdown_file
+write_csv_file
+write_json_file
+write_docx_file
+```
+
+These tools can trigger n8n workflows, call external APIs, write files, or run local commands inside a restricted workspace.
+
+### Self-Evolving Skills
+
+The agent does not blindly rewrite its own Skills. Instead, each run can produce a skill update proposal.
+
+```text
+1. Save run trace to memory/runs/
+2. Reflect on successful and failed steps
+3. Generate a JSON skill proposal
+4. Save proposal to skills/proposals/
+5. Apply only after review or approval
+```
+
+This gives the system a safe evolution path without corrupting core instructions.
+
+### Langfuse Observability
+
+Langfuse is used to trace the full orchestration lifecycle:
+
+```text
+root prompt
+planner call
+skill selection
+subagent execution
+ReAct steps
+model calls
+MCP tool calls
+final aggregation
+skill evolution proposal
+```
+
+It does not require an agent framework; the custom Python loop can emit traces directly.
+
+### Docker Sandbox
+
+Risky tools such as shell execution and file writes should run through the MCP server inside Docker.
+
+The MCP container can be restricted with:
+
+```text
+read-only filesystem
+limited mounted workspace
+no-new-privileges
+dropped Linux capabilities
+optional network isolation for local-only tools
+```
+
+For workflows that require n8n or external APIs, the automation MCP server can run with network access while local shell/file tools remain sandboxed separately.
+
+## Example Flow
+
+Prompt:
+
+```text
+Summarize unread emails and schedule follow-up reminders tomorrow at 10am.
+```
+
+Planner output:
 
 ```json
 {
   "tasks": [
     {
       "agent_type": "email",
-      "instruction": "summarize inbox and identify urgent threads",
+      "instruction": "Summarize unread emails and identify urgent follow-ups.",
       "complexity": "low"
     },
     {
       "agent_type": "calendar",
-      "instruction": "schedule follow-up reminders tomorrow at 10:00",
+      "instruction": "Schedule follow-up reminders tomorrow at 10am.",
       "complexity": "medium"
     }
   ]
 }
 ```
 
-### 3) SubAgent
-Each planned task becomes a `SubAgent` worker with:
-- task instruction
-- MCP tool access
-- complexity-aware model routing
+Execution:
 
-Each subagent uses a strict ReAct loop format:
-- `Action: {"tool":"...","arguments":{...},"reason":"..."}`
-- `Final: "..."`
+```text
+EmailSubAgent
+  -> loads email_reasoning Skill
+  -> calls MCP email_process
+  -> returns email summary
 
-### 4) Concurrent execution
-All subagents are run in parallel:
-
-```python
-results = await asyncio.gather(*(agent.execute() for agent in subagents))
+CalendarSubAgent
+  -> loads calendar_reasoning Skill
+  -> calls MCP calendar_schedule
+  -> returns scheduling result
 ```
 
-### 5) MCP integration
-Subagents call tools through `MCPToolClient`, which communicates with `mcp_server.py` over stdio.
-Each MCP tool can trigger an automation workflow (for example n8n webhooks).
-The MCP server also exposes `bash_execute` so subagents can run local shell commands for file navigation/CLI tasks.
-Additional MCP tools include `write_txt_file`, `write_markdown_file`, `write_csv_file`, `write_json_file`, and `write_docx_file` for document generation workflows.
-
----
-
-## ReAct Loop (inside each SubAgent)
-
-1. Send current context to routed model.
-2. Parse model output as either `Action` or `Final`.
-3. If `Action`:
-   - validate tool name + arguments
-   - call MCP tool
-   - append observation to next prompt
-4. If `Final`: return result for aggregation.
-5. Repeat until completion or max steps.
-
----
+Both subagents execute concurrently, then the orchestrator aggregates the final response.
 
 ## CLI Usage
 
-### Basic
+Basic run:
+
 ```bash
 python react_agent.py --prompt "Summarize unread emails and schedule follow-up tomorrow at 10am"
 ```
 
-### With explicit model routing config
+With local model routing:
+
 ```bash
 python react_agent.py \
   --prompt "Summarize unread emails and schedule follow-up tomorrow at 10am" \
-  --openai-model gpt-5.2 \
-  --ollama-small-model gemma3 \
-  --ollama-large-model llama4 \
+  --ollama-small-model llama3.2:3b \
+  --ollama-medium-model llama3.1:8b \
+  --ollama-large-model qwen2.5:14b \
   --ollama-base-url http://localhost:11434 \
   --mcp-server mcp_server.py \
   --max-subagent-steps 6
 ```
 
-### MCP command modes
-`react_agent.py` can launch MCP with any command:
+Dockerized MCP server:
 
-- Default python stdio mode:
 ```bash
-python react_agent.py --prompt "..." --mcp-command python --mcp-server mcp_server.py
-```
+docker build -f Dockerfile.mcp -t react-mcp-server:latest .
 
-- Dockerized MCP mode:
-```bash
-python react_agent.py --prompt "..." \
+python react_agent.py \
+  --prompt "Generate a markdown report from my email summary" \
   --mcp-command docker \
   --mcp-args run --rm -i react-mcp-server:latest
 ```
 
-### Dockerize the MCP server
-Build image:
+## Environment
+
 ```bash
-docker build -f Dockerfile.mcp -t react-mcp-server:latest .
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_SMALL_MODEL=llama3.2:3b
+OLLAMA_MEDIUM_MODEL=llama3.1:8b
+OLLAMA_LARGE_MODEL=qwen2.5:14b
+MCP_SERVER_PATH=mcp_server.py
+N8N_WEBHOOK_BASE=https://your-n8n-domain/webhook
+LANGFUSE_PUBLIC_KEY=
+LANGFUSE_SECRET_KEY=
+LANGFUSE_HOST=
 ```
 
-Or via compose:
-```bash
-docker compose build mcp-server
-```
+## Repository Direction
 
----
+The intended implementation path is:
 
-## End-to-End Example: Prompt → Routing → Parallel Subagents → Workflow
-
-### Input Prompt
 ```text
-Summarize unread emails, draft a social update from key highlights, and schedule follow-up reminders tomorrow at 10am.
+1. Local-only Ollama model routing
+2. Markdown SkillStore and skill selection
+3. Capability router with Skill-first, MCP-fallback behavior
+4. Per-run memory traces
+5. Skill proposal generation from run experience
+6. Docker-restricted MCP execution
+7. Langfuse tracing across the agent lifecycle
 ```
 
-### Planned Tasks (illustrative)
-```json
-{
-  "tasks": [
-    {"agent_type": "email", "instruction": "summarize unread inbox and urgent items", "complexity": "low"},
-    {"agent_type": "social", "instruction": "draft a short post from the summary", "complexity": "medium"},
-    {"agent_type": "calendar", "instruction": "schedule follow-up reminders tomorrow at 10:00", "complexity": "high"}
-  ]
-}
-```
+## Design Rule
 
-### Model Routing Decisions (illustrative)
-- Email subagent (`low`) → **Ollama / gemma3**
-- Social subagent (`medium`) → **Ollama / llama4**
-- Calendar subagent (`high`) → **OpenAI / gpt-5.2**
-
-### Parallel Subagent Work (illustrative)
-- SubAgent(email) calls MCP tool: `email_process`
-- SubAgent(social) calls MCP tool: `social_post`
-- SubAgent(calendar) calls MCP tool: `calendar_schedule`
-- SubAgent(ops) can call MCP tool: `bash_execute`
-
-All run concurrently and return individual results.
-
-### Aggregated Final Output (illustrative)
 ```text
-Done. I summarized your unread emails and highlighted urgent threads, drafted and posted a social update with the key highlights, and scheduled follow-up reminders for tomorrow at 10:00.
+Skills decide how to work.
+MCP performs actions.
+Langfuse observes the run.
+Docker contains risky execution.
 ```
-
----
-
-## Notes
-
-- The orchestrator currently runs one prompt per CLI invocation.
-- MCP server logic lives in `mcp_server.py`; orchestrator logic lives in `react_agent.py`.
-- You can swap models via CLI flags/environment variables without changing orchestration code.
