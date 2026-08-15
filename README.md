@@ -330,49 +330,6 @@ optional network isolation for local-only tools
 
 For workflows that require n8n or external APIs, the automation MCP server can run with network access while local shell/file tools remain sandboxed separately.
 
-## Example Flow
-
-Prompt:
-
-```text
-Summarize unread emails and schedule follow-up reminders tomorrow at 10am.
-```
-
-Planner output:
-
-```json
-{
-  "tasks": [
-    {
-      "agent_type": "email",
-      "instruction": "Summarize unread emails and identify urgent follow-ups.",
-      "complexity": "low"
-    },
-    {
-      "agent_type": "calendar",
-      "instruction": "Schedule follow-up reminders tomorrow at 10am.",
-      "complexity": "medium"
-    }
-  ]
-}
-```
-
-Execution:
-
-```text
-EmailSubAgent
-  -> loads email_reasoning Skill
-  -> calls MCP email_process
-  -> returns email summary
-
-CalendarSubAgent
-  -> loads calendar_reasoning Skill
-  -> calls MCP calendar_schedule
-  -> returns scheduling result
-```
-
-Both subagents execute concurrently, then the orchestrator aggregates the final response, saves run memory, and may ask for approval to apply a Skill proposal.
-
 ## Demo Scenarios
 
 ### Skill-First Email + Calendar Workflow
