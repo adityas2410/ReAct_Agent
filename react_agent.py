@@ -14,6 +14,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 from langfuse_tracer import LangfuseTracer
+from policy_engine import PolicyEngine
 from skill_proposal_applier import SkillProposalApplier
 
 
@@ -728,6 +729,7 @@ class SubAgent:
         mcp_client: MCPToolClient,
         max_steps: int = 6,
         tracer: LangfuseTracer | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         self.task = task
         self.model_router = model_router
@@ -738,6 +740,7 @@ class SubAgent:
         self.mcp_client = mcp_client
         self.max_steps = max_steps
         self.tracer = tracer or LangfuseTracer(enabled=False)
+        self.policy_engine = policy_engine or PolicyEngine(enabled=False)
 
     async def execute(self) -> dict[str, Any]:
         with self.tracer.observe(
@@ -815,6 +818,41 @@ class SubAgent:
                         steps.append(step)
                         self.tracer.update(step_span, output=step)
                         continue
+
+                    with self.tracer.observe(
+                        name="governance.policy_check",
+                        input={"tool": tool_name, "arguments": arguments},
+                        metadata={"agent_type": self.task.agent_type, "tool": tool_name},
+                    ) as policy_span:
+                        policy_result = self.policy_engine.review(
+                            tool_name=tool_name,
+                            arguments=arguments,
+                            action_reason=action.get("reason"),
+                        )
+                        step.update(policy_result.to_trace())
+                        self.tracer.update(policy_span, output=policy_result.to_trace())
+                        self.tracer.event(
+                            name=f"governance.tool_{policy_result.approval_status if policy_result.approval_status != 'not_required' else policy_result.decision}",
+                            input={"tool": tool_name, "arguments": arguments},
+                            output=policy_result.to_trace(),
+                            metadata={"agent_type": self.task.agent_type},
+                        )
+
+                    if policy_result.decision == "deny":
+                        step["blocked_tool_call"] = {
+                            "tool": tool_name,
+                            "arguments": arguments,
+                            "reason": policy_result.reason,
+                        }
+                        steps.append(step)
+                        result = self._result(
+                            status="failed",
+                            result=f"Governance blocked MCP tool '{tool_name}': {policy_result.reason}",
+                            steps=steps,
+                        )
+                        self.tracer.update(step_span, output=step)
+                        self.tracer.update(subagent_span, output=result)
+                        return result
 
                     with self.tracer.observe(
                         name="mcp.tool_call",
@@ -954,6 +992,7 @@ class AgentOrchestrator:
         memory_dir: str,
         skill_evolution_enabled: bool,
         tracer: LangfuseTracer | None = None,
+        policy_engine: PolicyEngine | None = None,
     ) -> None:
         self.skill_store = skill_store
         self.tracer = tracer or LangfuseTracer(enabled=False)
@@ -965,6 +1004,7 @@ class AgentOrchestrator:
         self.max_subagent_steps = max_subagent_steps
         self.memory = RunMemory(memory_dir=memory_dir)
         self.skill_evolution_enabled = skill_evolution_enabled
+        self.policy_engine = policy_engine or PolicyEngine(enabled=False)
         self.skill_evolution = SkillEvolution(
             model_router=model_router,
             skill_store=skill_store,
@@ -1018,6 +1058,7 @@ class AgentOrchestrator:
                     mcp_client=self.mcp_client,
                     max_steps=self.max_subagent_steps,
                     tracer=self.tracer,
+                    policy_engine=self.policy_engine,
                 )
                 for task, route in zip(tasks, routes)
             ]
@@ -1077,6 +1118,11 @@ class AgentOrchestrator:
             "prompt": prompt,
             "model_config": self.model_router.config(),
             "langfuse": self.tracer.config(),
+            "governance": {
+                "enabled": self.policy_engine.enabled,
+                "policy_path": str(self.policy_engine.policy_path),
+                "auto_approve_safe_tools": self.policy_engine.auto_approve_safe_tools,
+            },
             "mcp_tools": [tool.name for tool in self.tools],
             "planned_tasks": [
                 {
@@ -1177,6 +1223,21 @@ async def main() -> None:
         help="Disable optional Langfuse tracing.",
     )
     parser.add_argument(
+        "--governance-policy",
+        default=os.environ.get("GOVERNANCE_POLICY", "governance_policy.json"),
+        help="Path to local governance policy JSON.",
+    )
+    parser.add_argument(
+        "--auto-approve-safe-tools",
+        action="store_true",
+        help="Auto-approve tools listed in safe_auto_approve_tools in the governance policy.",
+    )
+    parser.add_argument(
+        "--disable-governance",
+        action="store_true",
+        help="Disable local governance checks before MCP tool execution.",
+    )
+    parser.add_argument(
         "--mcp-command",
         default=os.environ.get("MCP_SERVER_COMMAND", sys.executable),
         help="Command used to start MCP server process (e.g. python, docker).",
@@ -1212,6 +1273,11 @@ async def main() -> None:
         tracer=tracer,
     )
     skill_store = SkillStore(skills_dir=args.skills_dir)
+    policy_engine = PolicyEngine(
+        policy_path=args.governance_policy,
+        enabled=not args.disable_governance,
+        auto_approve_safe_tools=args.auto_approve_safe_tools,
+    )
 
     server_command = args.mcp_command
     server_args = args.mcp_args if args.mcp_args is not None else [args.mcp_server]
@@ -1227,6 +1293,7 @@ async def main() -> None:
             memory_dir=args.memory_dir,
             skill_evolution_enabled=not args.disable_skill_evolution,
             tracer=tracer,
+            policy_engine=policy_engine,
         )
         final_answer = await orchestrator.run(prompt=args.prompt)
         print(final_answer)

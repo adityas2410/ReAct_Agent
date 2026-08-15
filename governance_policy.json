@@ -1,0 +1,42 @@
+{
+  "default_decision": "deny",
+  "allow_tools": [
+    "daily_summary"
+  ],
+  "approval_required_tools": [
+    "calendar_schedule",
+    "social_post",
+    "bash_execute"
+  ],
+  "safe_auto_approve_tools": [],
+  "email_process": {
+    "allow_modes": [
+      "summary",
+      "urgent"
+    ],
+    "approval_required_modes": [
+      "cleanup"
+    ],
+    "default_decision": "approval_required"
+  },
+  "file_write_tools": [
+    "write_txt_file",
+    "write_markdown_file",
+    "write_csv_file",
+    "write_json_file",
+    "write_docx_file"
+  ],
+  "workspace_dirs": [
+    "workspace",
+    "outputs",
+    "memory"
+  ],
+  "denied_command_patterns": [
+    "rm -rf",
+    "del ",
+    "format ",
+    "shutdown",
+    "curl | sh",
+    "wget | sh"
+  ]
+}

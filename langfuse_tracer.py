@@ -112,6 +112,17 @@ class LangfuseTracer:
         except Exception as exc:
             self.disabled_reason = f"{type(exc).__name__}: {exc}"
 
+    def event(
+        self,
+        name: str,
+        input: Any | None = None,
+        output: Any | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        with self.observe(name=name, as_type="event", input=input, metadata=metadata) as event:
+            if output is not None:
+                self.update(event, output=output)
+
     def flush(self) -> None:
         if self.client is None:
             return
