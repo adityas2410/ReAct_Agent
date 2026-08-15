@@ -29,28 +29,26 @@ Each subagent follows this routing order:
 
 This keeps the agent grounded: Skills define how the agent should work, while MCP tools perform real actions such as email processing, calendar scheduling, file generation, shell execution, or n8n workflow calls.
 
-## Feature Matrix
+## Features
 
-| Capability | Status | Where |
-| --- | --- | --- |
-| Local-only model routing | Implemented | `ModelRouter` routes low/medium/high tasks to Ollama models |
-| ReAct subagents | Implemented | `SubAgent.execute()` runs Action/Observation/Final loops |
-| Concurrent task delegation | Implemented | `AgentOrchestrator` spawns subagents with `asyncio.gather` |
-| Markdown Skills | Implemented | `skills/*/SKILL.md` loaded by `SkillStore` |
-| Skill-first routing | Implemented | `CapabilityRouter` selects Skills before MCP fallback |
-| MCP execution layer | Implemented | `MCPToolClient` calls FastMCP tools from `mcp_server.py` |
-| Self-evolving Skills | Implemented as approval flow | run memory -> proposal -> user approval -> Skill update/create |
-| Local run memory | Implemented | JSON traces under `memory/runs/` |
-| Langfuse observability | Optional | enabled by Langfuse env vars; no framework required |
-| Governance | Implemented | `PolicyEngine` checks MCP calls before execution |
-| Docker MCP sandbox | Implemented | non-root, read-only container, writable workspace mount |
+- Local Ollama model routing for low, medium, and high complexity tasks.
+- ReAct-style subagents that reason, choose an action, observe tool output, and return a final result.
+- Concurrent task delegation so email, calendar, file, shell, and content workflows can run as separate focused subagents.
+- Markdown Skills that describe task procedures, triggers, and allowed execution tools.
+- Skill-first routing: the agent checks relevant Skills before falling back to raw MCP tool matching.
+- Self-hosted FastMCP execution layer for n8n workflows, file generation, and sandboxed shell actions.
+- Self-evolving Skills through run memory, local reflection, proposed updates, and user approval.
+- Local JSON run memory that records prompts, planned tasks, selected Skills, tool calls, policy decisions, errors, and final answers.
+- Optional Langfuse observability for tracing planner calls, subagent steps, model outputs, MCP calls, and Skill evolution.
+- Local governance policy that can allow, block, or request approval before MCP tools execute.
+- Docker-based MCP sandboxing with a restricted writable workspace, non-root execution, dropped capabilities, and a read-only container filesystem.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    U[User Prompt] --> O[AgentOrchestrator]
-    O --> P[TaskPlanner]
+    U[User Prompt] --> O[Agent Orchestrator]
+    O --> P[Task Planner]
     P --> T[Structured Task Plan]
 
     T --> SA1[Email Subagent]
@@ -165,8 +163,8 @@ How it is used:
 
 ```text
 User prompt mentions unread emails
-SkillStore matches email triggers
-SubAgent receives email_reasoning in Relevant Skills
+Skill routing matches email triggers
+Email subagent receives email_reasoning in Relevant Skills
 Only email_process and daily_summary are exposed for that routed task
 Governance still checks the final MCP call before execution
 ```
@@ -196,7 +194,7 @@ Governance is local policy enforcement before MCP execution. It decides whether 
 
 ```text
 Model proposes MCP tool call
-PolicyEngine checks tool + arguments
+Governance policy checks tool + arguments
 allow / approval_required / deny
 Only allowed calls reach MCP
 ```
@@ -444,7 +442,7 @@ Action: {"tool":"bash_execute","arguments":{"command":"rm -rf workspace"},"reaso
 Expected result:
 
 ```text
-PolicyEngine detects denied command pattern
+Governance policy detects denied command pattern
 MCP tool is not called
 subagent returns failed blocked result
 memory trace includes blocked_tool_call
