@@ -13,6 +13,7 @@ import requests
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+from langfuse_tracer import LangfuseTracer
 from skill_proposal_applier import SkillProposalApplier
 
 
@@ -160,11 +161,13 @@ class ModelRouter:
         ollama_small_model: str = "llama3.2:3b",
         ollama_medium_model: str = "llama3.1:8b",
         ollama_large_model: str = "qwen2.5:14b",
+        tracer: LangfuseTracer | None = None,
     ) -> None:
         self.ollama_base_url = ollama_base_url.rstrip("/")
         self.ollama_small_model = ollama_small_model
         self.ollama_medium_model = ollama_medium_model
         self.ollama_large_model = ollama_large_model
+        self.tracer = tracer or LangfuseTracer(enabled=False)
 
     def config(self) -> dict[str, str]:
         return {
@@ -174,15 +177,33 @@ class ModelRouter:
             "ollama_large_model": self.ollama_large_model,
         }
 
-    def generate(self, messages: list[dict[str, str]], complexity: str) -> str:
+    def generate(
+        self,
+        messages: list[dict[str, str]],
+        complexity: str,
+        trace_name: str = "ollama.generate",
+        metadata: dict[str, Any] | None = None,
+    ) -> str:
         normalized = complexity.lower().strip()
         if normalized == "high":
-            return self._generate_ollama(messages, self.ollama_large_model)
+            model_name = self.ollama_large_model
+        elif normalized == "medium":
+            model_name = self.ollama_medium_model
+        else:
+            model_name = self.ollama_small_model
 
-        if normalized == "medium":
-            return self._generate_ollama(messages, self.ollama_medium_model)
+        trace_metadata = {"complexity": normalized, **(metadata or {})}
+        with self.tracer.observe(
+            name=trace_name,
+            as_type="generation",
+            input={"messages": messages},
+            metadata=trace_metadata,
+            model=model_name,
+        ) as generation:
+            output = self._generate_ollama(messages, model_name)
+            self.tracer.update(generation, output=output)
+            return output
 
-        return self._generate_ollama(messages, self.ollama_small_model)
 
     def _generate_ollama(self, messages: list[dict[str, str]], model_name: str) -> str:
         payload = {
@@ -418,20 +439,44 @@ class SkillEvolution:
     Generates proposal JSON from run traces without editing real Skills.
     """
 
-    def __init__(self, model_router: ModelRouter, skill_store: SkillStore, skills_dir: str = "skills") -> None:
+    def __init__(
+        self,
+        model_router: ModelRouter,
+        skill_store: SkillStore,
+        skills_dir: str = "skills",
+        tracer: LangfuseTracer | None = None,
+    ) -> None:
         self.model_router = model_router
         self.skill_store = skill_store
         self.proposals_dir = Path(skills_dir) / "proposals"
+        self.tracer = tracer or LangfuseTracer(enabled=False)
 
     def maybe_create_proposal(self, trace: dict[str, Any]) -> str | None:
-        proposal = self._missing_capability_proposal(trace)
-        if proposal is None:
-            proposal = self._model_proposal(trace)
+        with self.tracer.observe(
+            name="skill_evolution.propose",
+            input={
+                "run_id": trace.get("run_id"),
+                "unsupported_tasks": trace.get("unsupported_tasks", []),
+            },
+            metadata={
+                "selected_skills": sorted({
+                    skill
+                    for result in trace.get("subagent_results", [])
+                    for skill in result.get("selected_skills", [])
+                })
+            },
+        ) as span:
+            proposal = self._missing_capability_proposal(trace)
+            if proposal is None:
+                proposal = self._model_proposal(trace)
 
-        if proposal is None:
-            return None
+            if proposal is None:
+                self.tracer.update(span, output={"proposal_created": False})
+                return None
 
-        return self._save_proposal(trace, proposal)
+            path = self._save_proposal(trace, proposal)
+            self.tracer.update(span, output={"proposal_created": True, "proposal_path": path, "proposal": proposal})
+            return path
 
     def _missing_capability_proposal(self, trace: dict[str, Any]) -> dict[str, Any] | None:
         unsupported = [
@@ -478,7 +523,12 @@ class SkillEvolution:
         ]
 
         try:
-            raw = self.model_router.generate(messages=messages, complexity="high")
+            raw = self.model_router.generate(
+                messages=messages,
+                complexity="high",
+                trace_name="skill_evolution.model_call",
+                metadata={"component": "SkillEvolution"},
+            )
             data = self._extract_json(raw)
         except Exception:
             return None
@@ -561,56 +611,82 @@ class TaskPlanner:
     Creates a structured task plan from the user prompt.
     """
 
-    def __init__(self, model_router: ModelRouter, skill_store: SkillStore) -> None:
+    def __init__(
+        self,
+        model_router: ModelRouter,
+        skill_store: SkillStore,
+        tracer: LangfuseTracer | None = None,
+    ) -> None:
         self.model_router = model_router
         self.skill_store = skill_store
+        self.tracer = tracer or LangfuseTracer(enabled=False)
 
     def plan(self, prompt: str) -> list[TaskPlanItem]:
-        planner_prompt = (
-            "You are a task planner for a local-first automation orchestrator. "
-            "Break the request into executable subagent tasks.\n"
-            "Use the planning Skill below when present.\n\n"
-            f"Relevant planning Skill:\n{self._format_skills(self.skill_store.planning_skills())}\n\n"
-            "Return only JSON with this exact schema:\n"
-            '{"tasks":[{"agent_type":"...","instruction":"...","complexity":"low|medium|high"}]}\n'
-            "Use as many tasks as needed, but keep them practical and tool-oriented."
-        )
-        messages = [
-            {"role": "system", "content": planner_prompt},
-            {"role": "user", "content": prompt},
-        ]
-        raw = self.model_router.generate(messages, complexity="high")
-        plan_json = self._extract_json(raw)
-
-        tasks_raw = plan_json.get("tasks", [])
-        if not isinstance(tasks_raw, list) or not tasks_raw:
-            raise ValueError("Planner returned an invalid or empty tasks list")
-
-        tasks: list[TaskPlanItem] = []
-        for item in tasks_raw:
-            if not isinstance(item, dict):
-                continue
-            agent_type = str(item.get("agent_type", "general")).strip() or "general"
-            instruction = str(item.get("instruction", "")).strip()
-            complexity = str(item.get("complexity", "low")).strip().lower()
-
-            if not instruction:
-                continue
-            if complexity not in {"low", "medium", "high"}:
-                complexity = "medium"
-
-            tasks.append(
-                TaskPlanItem(
-                    agent_type=agent_type,
-                    instruction=instruction,
-                    complexity=complexity,
-                )
+        planning_skills = self.skill_store.planning_skills()
+        with self.tracer.observe(
+            name="planner.plan",
+            input={"prompt": prompt},
+            metadata={"planning_skills": [skill.name for skill in planning_skills]},
+        ) as span:
+            planner_prompt = (
+                "You are a task planner for a local-first automation orchestrator. "
+                "Break the request into executable subagent tasks.\n"
+                "Use the planning Skill below when present.\n\n"
+                f"Relevant planning Skill:\n{self._format_skills(planning_skills)}\n\n"
+                "Return only JSON with this exact schema:\n"
+                '{"tasks":[{"agent_type":"...","instruction":"...","complexity":"low|medium|high"}]}\n'
+                "Use as many tasks as needed, but keep them practical and tool-oriented."
             )
+            messages = [
+                {"role": "system", "content": planner_prompt},
+                {"role": "user", "content": prompt},
+            ]
+            raw = self.model_router.generate(
+                messages,
+                complexity="high",
+                trace_name="planner.model_call",
+                metadata={"component": "TaskPlanner"},
+            )
+            plan_json = self._extract_json(raw)
 
-        if not tasks:
-            raise ValueError("Planner produced no usable tasks")
+            tasks_raw = plan_json.get("tasks", [])
+            if not isinstance(tasks_raw, list) or not tasks_raw:
+                raise ValueError("Planner returned an invalid or empty tasks list")
 
-        return tasks
+            tasks: list[TaskPlanItem] = []
+            for item in tasks_raw:
+                if not isinstance(item, dict):
+                    continue
+                agent_type = str(item.get("agent_type", "general")).strip() or "general"
+                instruction = str(item.get("instruction", "")).strip()
+                complexity = str(item.get("complexity", "low")).strip().lower()
+
+                if not instruction:
+                    continue
+                if complexity not in {"low", "medium", "high"}:
+                    complexity = "medium"
+
+                tasks.append(
+                    TaskPlanItem(
+                        agent_type=agent_type,
+                        instruction=instruction,
+                        complexity=complexity,
+                    )
+                )
+
+            if not tasks:
+                raise ValueError("Planner produced no usable tasks")
+
+            output = [
+                {
+                    "agent_type": task.agent_type,
+                    "instruction": task.instruction,
+                    "complexity": task.complexity,
+                }
+                for task in tasks
+            ]
+            self.tracer.update(span, output={"tasks": output})
+            return tasks
 
     def _format_skills(self, skills: list[Skill]) -> str:
         if not skills:
@@ -651,6 +727,7 @@ class SubAgent:
         route: CapabilityRoute,
         mcp_client: MCPToolClient,
         max_steps: int = 6,
+        tracer: LangfuseTracer | None = None,
     ) -> None:
         self.task = task
         self.model_router = model_router
@@ -660,79 +737,115 @@ class SubAgent:
         self.tool_index = {t.name: t for t in self.tools}
         self.mcp_client = mcp_client
         self.max_steps = max_steps
+        self.tracer = tracer or LangfuseTracer(enabled=False)
 
     async def execute(self) -> dict[str, Any]:
-        if self.route.mode == "unsupported":
-            return self._result(
-                status="unsupported",
-                result=self.route.unsupported_reason or "Unsupported task.",
-                steps=[],
-            )
-
-        history: list[dict[str, str]] = []
-        steps: list[dict[str, Any]] = []
-        user_input = self.task.instruction
-
-        for step_number in range(1, self.max_steps + 1):
-            step: dict[str, Any] = {"step": step_number, "input": user_input}
-            try:
-                response = self._chat(user_input=user_input, history=history)
-                parsed_type, parsed_payload = self._parse_model_output(response)
-                step["model_output"] = response
-                step["parsed_type"] = parsed_type
-            except Exception as exc:
-                step["error"] = f"{type(exc).__name__}: {exc}"
-                user_input = (
-                    f"Your previous response could not be parsed: {type(exc).__name__}: {exc}.\n"
-                    "Respond with exactly one valid Action or Final message."
+        with self.tracer.observe(
+            name=f"subagent.{self.task.agent_type}",
+            input={
+                "agent_type": self.task.agent_type,
+                "instruction": self.task.instruction,
+                "complexity": self.task.complexity,
+            },
+            metadata={
+                "route_mode": self.route.mode,
+                "selected_skills": [skill.name for skill in self.skills],
+                "available_tools": [tool.name for tool in self.tools],
+            },
+        ) as subagent_span:
+            if self.route.mode == "unsupported":
+                result = self._result(
+                    status="unsupported",
+                    result=self.route.unsupported_reason or "Unsupported task.",
+                    steps=[],
                 )
-                step["recovery_prompt"] = user_input
-                steps.append(step)
-                continue
+                self.tracer.update(subagent_span, output=result)
+                return result
 
-            if parsed_type == "final":
-                step["final"] = parsed_payload
-                steps.append(step)
-                return self._result(status="completed", result=parsed_payload, steps=steps)
+            history: list[dict[str, str]] = []
+            steps: list[dict[str, Any]] = []
+            user_input = self.task.instruction
 
-            action = parsed_payload
-            tool_name = action["tool"]
-            arguments = action.get("arguments", {})
-            step["action"] = action
+            for step_number in range(1, self.max_steps + 1):
+                step: dict[str, Any] = {"step": step_number, "input": user_input}
+                with self.tracer.observe(
+                    name="react.step",
+                    input=step,
+                    metadata={"agent_type": self.task.agent_type, "step": step_number},
+                ) as step_span:
+                    try:
+                        response = self._chat(user_input=user_input, history=history)
+                        parsed_type, parsed_payload = self._parse_model_output(response)
+                        step["model_output"] = response
+                        step["parsed_type"] = parsed_type
+                    except Exception as exc:
+                        step["error"] = f"{type(exc).__name__}: {exc}"
+                        user_input = (
+                            f"Your previous response could not be parsed: {type(exc).__name__}: {exc}.\n"
+                            "Respond with exactly one valid Action or Final message."
+                        )
+                        step["recovery_prompt"] = user_input
+                        steps.append(step)
+                        self.tracer.update(step_span, output=step)
+                        continue
 
-            history.append({"role": "assistant", "content": response})
+                    if parsed_type == "final":
+                        step["final"] = parsed_payload
+                        steps.append(step)
+                        result = self._result(status="completed", result=parsed_payload, steps=steps)
+                        self.tracer.update(step_span, output=step)
+                        self.tracer.update(subagent_span, output=result)
+                        return result
 
-            if tool_name not in self.tool_index:
-                user_input = (
-                    f"Requested tool '{tool_name}' is unavailable for this task. "
-                    f"Available tools: {', '.join(sorted(self.tool_index.keys())) or 'none'}.\n"
-                    "Respond with one available Action or a Final message."
-                )
-                step["unavailable_tool"] = tool_name
-                step["recovery_prompt"] = user_input
-                steps.append(step)
-                continue
+                    action = parsed_payload
+                    tool_name = action["tool"]
+                    arguments = action.get("arguments", {})
+                    step["action"] = action
 
-            try:
-                tool_output = await self.mcp_client.call_tool(tool_name, arguments)
-                observation = json.dumps(tool_output, ensure_ascii=False)
-                user_input = (
-                    f"Observation from MCP tool '{tool_name}': {observation}\n"
-                    "Continue with another Action if needed, otherwise return Final."
-                )
-                step["observation"] = tool_output
-                step["next_prompt"] = user_input
-            except Exception as exc:
-                user_input = (
-                    f"MCP tool call failed for '{tool_name}': {type(exc).__name__}: {exc}\n"
-                    "Use the error recovery Skill if available, then recover with another Action or return Final."
-                )
-                step["tool_error"] = f"{type(exc).__name__}: {exc}"
-                step["recovery_prompt"] = user_input
+                    history.append({"role": "assistant", "content": response})
 
-            steps.append(step)
+                    if tool_name not in self.tool_index:
+                        user_input = (
+                            f"Requested tool '{tool_name}' is unavailable for this task. "
+                            f"Available tools: {', '.join(sorted(self.tool_index.keys())) or 'none'}.\n"
+                            "Respond with one available Action or a Final message."
+                        )
+                        step["unavailable_tool"] = tool_name
+                        step["recovery_prompt"] = user_input
+                        steps.append(step)
+                        self.tracer.update(step_span, output=step)
+                        continue
 
-        return self._result(status="failed", result="Subagent reached max steps without Final output.", steps=steps)
+                    with self.tracer.observe(
+                        name="mcp.tool_call",
+                        input={"tool": tool_name, "arguments": arguments},
+                        metadata={"agent_type": self.task.agent_type, "tool": tool_name},
+                    ) as tool_span:
+                        try:
+                            tool_output = await self.mcp_client.call_tool(tool_name, arguments)
+                            observation = json.dumps(tool_output, ensure_ascii=False)
+                            user_input = (
+                                f"Observation from MCP tool '{tool_name}': {observation}\n"
+                                "Continue with another Action if needed, otherwise return Final."
+                            )
+                            step["observation"] = tool_output
+                            step["next_prompt"] = user_input
+                            self.tracer.update(tool_span, output=tool_output)
+                        except Exception as exc:
+                            user_input = (
+                                f"MCP tool call failed for '{tool_name}': {type(exc).__name__}: {exc}\n"
+                                "Use the error recovery Skill if available, then recover with another Action or return Final."
+                            )
+                            step["tool_error"] = f"{type(exc).__name__}: {exc}"
+                            step["recovery_prompt"] = user_input
+                            self.tracer.update(tool_span, output={"error": step["tool_error"]})
+
+                    steps.append(step)
+                    self.tracer.update(step_span, output=step)
+
+            result = self._result(status="failed", result="Subagent reached max steps without Final output.", steps=steps)
+            self.tracer.update(subagent_span, output=result)
+            return result
 
     def _result(self, status: str, result: Any, steps: list[dict[str, Any]]) -> dict[str, Any]:
         return {
@@ -750,7 +863,12 @@ class SubAgent:
         messages = [{"role": "system", "content": self._build_instructions()}]
         messages.extend(history)
         messages.append({"role": "user", "content": user_input})
-        return self.model_router.generate(messages=messages, complexity=self.task.complexity)
+        return self.model_router.generate(
+            messages=messages,
+            complexity=self.task.complexity,
+            trace_name="subagent.model_call",
+            metadata={"agent_type": self.task.agent_type},
+        )
 
     def _build_instructions(self) -> str:
         return (
@@ -835,9 +953,11 @@ class AgentOrchestrator:
         max_subagent_steps: int,
         memory_dir: str,
         skill_evolution_enabled: bool,
+        tracer: LangfuseTracer | None = None,
     ) -> None:
         self.skill_store = skill_store
-        self.planner = TaskPlanner(model_router=model_router, skill_store=skill_store)
+        self.tracer = tracer or LangfuseTracer(enabled=False)
+        self.planner = TaskPlanner(model_router=model_router, skill_store=skill_store, tracer=self.tracer)
         self.model_router = model_router
         self.mcp_client = mcp_client
         self.tools = tools
@@ -849,50 +969,96 @@ class AgentOrchestrator:
             model_router=model_router,
             skill_store=skill_store,
             skills_dir=str(skill_store.skills_dir),
+            tracer=self.tracer,
         )
         self.skill_proposal_applier = SkillProposalApplier(skills_dir=str(skill_store.skills_dir))
 
     async def run(self, prompt: str) -> str:
-        tasks = self.planner.plan(prompt)
-        routes = [self.capability_router.resolve(prompt=prompt, task=task) for task in tasks]
-        subagents = [
-            SubAgent(
-                task=task,
-                model_router=self.model_router,
-                route=route,
-                mcp_client=self.mcp_client,
-                max_steps=self.max_subagent_steps,
+        with self.tracer.observe(
+            name="orchestrator.run",
+            input={"prompt": prompt},
+            metadata={"model_config": self.model_router.config()},
+        ) as root_span:
+            tasks = self.planner.plan(prompt)
+            with self.tracer.observe(
+                name="capability.routing",
+                input={
+                    "prompt": prompt,
+                    "tasks": [
+                        {
+                            "agent_type": task.agent_type,
+                            "instruction": task.instruction,
+                            "complexity": task.complexity,
+                        }
+                        for task in tasks
+                    ],
+                },
+                metadata={"mcp_tools": [tool.name for tool in self.tools]},
+            ) as routing_span:
+                routes = [self.capability_router.resolve(prompt=prompt, task=task) for task in tasks]
+                self.tracer.update(
+                    routing_span,
+                    output=[
+                        {
+                            "agent_type": task.agent_type,
+                            "route_mode": route.mode,
+                            "selected_skills": [skill.name for skill in route.skills],
+                            "available_tools": [tool.name for tool in route.tools],
+                            "unsupported_reason": route.unsupported_reason,
+                        }
+                        for task, route in zip(tasks, routes)
+                    ],
+                )
+
+            subagents = [
+                SubAgent(
+                    task=task,
+                    model_router=self.model_router,
+                    route=route,
+                    mcp_client=self.mcp_client,
+                    max_steps=self.max_subagent_steps,
+                    tracer=self.tracer,
+                )
+                for task, route in zip(tasks, routes)
+            ]
+
+            results = await asyncio.gather(*(agent.execute() for agent in subagents))
+            final_answer = self._aggregate(prompt=prompt, tasks=tasks, results=results)
+            trace = self._build_trace(
+                prompt=prompt,
+                tasks=tasks,
+                routes=routes,
+                results=results,
+                final_answer=final_answer,
             )
-            for task, route in zip(tasks, routes)
-        ]
+            trace["langfuse"] = self.tracer.config()
+            run_path = self.memory.save(trace)
+            trace["run_path"] = run_path
+            trace["langfuse"] = self.tracer.config()
+            self.memory.save(trace)
 
-        results = await asyncio.gather(*(agent.execute() for agent in subagents))
-        final_answer = self._aggregate(prompt=prompt, tasks=tasks, results=results)
-        trace = self._build_trace(
-            prompt=prompt,
-            tasks=tasks,
-            routes=routes,
-            results=results,
-            final_answer=final_answer,
-        )
-        run_path = self.memory.save(trace)
-        trace["run_path"] = run_path
-        self.memory.save(trace)
+            if self.skill_evolution_enabled:
+                proposal_path = self.skill_evolution.maybe_create_proposal(trace)
+                if proposal_path:
+                    with self.tracer.observe(
+                        name="skill_evolution.review",
+                        input={"proposal_path": proposal_path},
+                    ) as review_span:
+                        review_result = self.skill_proposal_applier.review(proposal_path)
+                        trace["skill_proposal_review"] = review_result
+                        if review_result.get("status") == "applied":
+                            trace["skill_proposal_path"] = proposal_path
+                        elif review_result.get("status") == "rejected_deleted":
+                            trace["deleted_skill_proposal_path"] = proposal_path
+                        else:
+                            trace["skill_proposal_path"] = proposal_path
+                        self.tracer.update(review_span, output=review_result)
+                    trace["langfuse"] = self.tracer.config()
+                    self.memory.save(trace)
 
-        if self.skill_evolution_enabled:
-            proposal_path = self.skill_evolution.maybe_create_proposal(trace)
-            if proposal_path:
-                review_result = self.skill_proposal_applier.review(proposal_path)
-                trace["skill_proposal_review"] = review_result
-                if review_result.get("status") == "applied":
-                    trace["skill_proposal_path"] = proposal_path
-                elif review_result.get("status") == "rejected_deleted":
-                    trace["deleted_skill_proposal_path"] = proposal_path
-                else:
-                    trace["skill_proposal_path"] = proposal_path
-                self.memory.save(trace)
-
-        return final_answer
+            self.tracer.update(root_span, output={"final_answer": final_answer, "run_path": trace.get("run_path")})
+            self.tracer.flush()
+            return final_answer
 
     def _build_trace(
         self,
@@ -910,6 +1076,7 @@ class AgentOrchestrator:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "prompt": prompt,
             "model_config": self.model_router.config(),
+            "langfuse": self.tracer.config(),
             "mcp_tools": [tool.name for tool in self.tools],
             "planned_tasks": [
                 {
@@ -958,7 +1125,12 @@ class AgentOrchestrator:
                 ),
             },
         ]
-        return self.model_router.generate(messages=messages, complexity="high")
+        return self.model_router.generate(
+            messages=messages,
+            complexity="high",
+            trace_name="orchestrator.aggregate",
+            metadata={"component": "AgentOrchestrator"},
+        )
 
 
 async def main() -> None:
@@ -1000,6 +1172,11 @@ async def main() -> None:
         help="Disable proposal-only Skill evolution after each run.",
     )
     parser.add_argument(
+        "--disable-langfuse",
+        action="store_true",
+        help="Disable optional Langfuse tracing.",
+    )
+    parser.add_argument(
         "--mcp-command",
         default=os.environ.get("MCP_SERVER_COMMAND", sys.executable),
         help="Command used to start MCP server process (e.g. python, docker).",
@@ -1023,11 +1200,16 @@ async def main() -> None:
     )
     args = parser.parse_args()
 
+    tracer = LangfuseTracer(
+        enabled=not args.disable_langfuse,
+        host=os.environ.get("LANGFUSE_HOST", "http://localhost:3000"),
+    )
     model_router = ModelRouter(
         ollama_base_url=args.ollama_base_url,
         ollama_small_model=args.ollama_small_model,
         ollama_medium_model=args.ollama_medium_model,
         ollama_large_model=args.ollama_large_model,
+        tracer=tracer,
     )
     skill_store = SkillStore(skills_dir=args.skills_dir)
 
@@ -1044,6 +1226,7 @@ async def main() -> None:
             max_subagent_steps=args.max_subagent_steps,
             memory_dir=args.memory_dir,
             skill_evolution_enabled=not args.disable_skill_evolution,
+            tracer=tracer,
         )
         final_answer = await orchestrator.run(prompt=args.prompt)
         print(final_answer)

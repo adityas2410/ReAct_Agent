@@ -184,7 +184,9 @@ Unsupported tasks automatically create `missing_capability` proposals. Normal ru
 
 ### Langfuse Observability
 
-Langfuse is used to trace the full orchestration lifecycle:
+Langfuse is optional and observes the custom Python loop directly. It does not require LangChain, CrewAI, OpenAI Agents SDK, or any other agent framework.
+
+When `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY` are configured, the agent traces the full orchestration lifecycle:
 
 ```text
 root prompt
@@ -198,7 +200,7 @@ final aggregation
 skill evolution proposal
 ```
 
-It does not require an agent framework; the custom Python loop can emit traces directly.
+If Langfuse is not configured, the agent still runs normally and saves local traces under `memory/runs/`.
 
 ### Docker Sandbox
 
@@ -282,12 +284,33 @@ python react_agent.py \
   --max-subagent-steps 6
 ```
 
+With optional self-hosted Langfuse:
+
+```bash
+LANGFUSE_PUBLIC_KEY=pk-lf-...
+LANGFUSE_SECRET_KEY=sk-lf-...
+LANGFUSE_HOST=http://localhost:3000
+
+python react_agent.py \
+  --prompt "Summarize unread emails" \
+  --skills-dir skills \
+  --memory-dir memory
+```
+
 Disable proposal generation while still saving run memory:
 
 ```bash
 python react_agent.py \
   --prompt "Summarize unread emails" \
   --disable-skill-evolution
+```
+
+Disable Langfuse while keeping local run memory:
+
+```bash
+python react_agent.py \
+  --prompt "Summarize unread emails" \
+  --disable-langfuse
 ```
 
 Dockerized MCP server:
@@ -316,7 +339,8 @@ MCP_SERVER_PATH=mcp_server.py
 N8N_WEBHOOK_BASE=https://your-n8n-domain/webhook
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
-LANGFUSE_HOST=
+LANGFUSE_HOST=http://localhost:3000
+LANGFUSE_BASE_URL=
 ```
 
 ## Repository Direction
@@ -329,8 +353,8 @@ The intended implementation path is:
 3. Capability router with Skill-first, MCP-fallback behavior
 4. Per-run memory traces
 5. Skill proposal generation from run experience
-6. Docker-restricted MCP execution
-7. Langfuse tracing across the agent lifecycle
+6. Langfuse tracing across the agent lifecycle
+7. Docker-restricted MCP execution
 ```
 
 ## Design Rule
