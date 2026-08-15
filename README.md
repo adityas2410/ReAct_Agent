@@ -29,6 +29,22 @@ Each subagent follows this routing order:
 
 This keeps the agent grounded: Skills define how the agent should work, while MCP tools perform real actions such as email processing, calendar scheduling, file generation, shell execution, or n8n workflow calls.
 
+## Feature Matrix
+
+| Capability | Status | Where |
+| --- | --- | --- |
+| Local-only model routing | Implemented | `ModelRouter` routes low/medium/high tasks to Ollama models |
+| ReAct subagents | Implemented | `SubAgent.execute()` runs Action/Observation/Final loops |
+| Concurrent task delegation | Implemented | `AgentOrchestrator` spawns subagents with `asyncio.gather` |
+| Markdown Skills | Implemented | `skills/*/SKILL.md` loaded by `SkillStore` |
+| Skill-first routing | Implemented | `CapabilityRouter` selects Skills before MCP fallback |
+| MCP execution layer | Implemented | `MCPToolClient` calls FastMCP tools from `mcp_server.py` |
+| Self-evolving Skills | Implemented as approval flow | run memory -> proposal -> user approval -> Skill update/create |
+| Local run memory | Implemented | JSON traces under `memory/runs/` |
+| Langfuse observability | Optional | enabled by Langfuse env vars; no framework required |
+| Governance | Implemented | `PolicyEngine` checks MCP calls before execution |
+| Docker MCP sandbox | Implemented | non-root, read-only container, writable workspace mount |
+
 ## Architecture
 
 ```mermaid
@@ -288,6 +304,68 @@ CalendarSubAgent
 ```
 
 Both subagents execute concurrently, then the orchestrator aggregates the final response, saves run memory, and may ask for approval to apply a Skill proposal.
+
+## Demo Scenarios
+
+### Skill-First Email + Calendar Workflow
+
+```bash
+python react_agent.py \
+  --prompt "Summarize unread emails and schedule follow-up reminders tomorrow at 10am" \
+  --skills-dir skills \
+  --memory-dir memory
+```
+
+Expected route:
+
+```text
+TaskPlanner -> email task + calendar task
+email task -> email_reasoning Skill -> email_process MCP tool
+calendar task -> calendar_reasoning Skill -> calendar_schedule MCP tool
+governance -> email summary allowed, calendar scheduling asks approval
+memory -> saves selected Skills, tool calls, policy decisions, final answer
+Langfuse -> records the same lifecycle when configured
+```
+
+### Unsupported Capability Becomes a Skill Proposal
+
+```bash
+python react_agent.py \
+  --prompt "Book the cheapest flight to Tokyo next Friday" \
+  --skills-dir skills \
+  --memory-dir memory
+```
+
+Expected route:
+
+```text
+No matching flight Skill
+No matching MCP flight booking tool
+subagent returns unsupported
+memory trace is saved
+SkillEvolution creates missing_capability proposal
+CLI asks whether to create/update the Skill
+user approves -> new Skill stub is created
+user rejects -> proposal JSON is deleted
+```
+
+### Governance Blocks a Risky Shell Action
+
+If a subagent tries:
+
+```text
+Action: {"tool":"bash_execute","arguments":{"command":"rm -rf workspace"},"reason":"clean old files"}
+```
+
+Expected result:
+
+```text
+PolicyEngine detects denied command pattern
+MCP tool is not called
+subagent returns failed blocked result
+memory trace includes blocked_tool_call
+Langfuse records governance.tool_deny when configured
+```
 
 ## CLI Usage
 
