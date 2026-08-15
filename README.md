@@ -61,7 +61,8 @@ flowchart TD
     SA2 --> MCP
     SA3 --> MCP
 
-    MCP --> MS[FastMCP Server]
+    MCP --> GOV[Governance Policy]
+    GOV --> MS[FastMCP Server]
     MS --> N8N[n8n workflows / APIs]
     MS --> FS[File tools]
     MS --> SH[Sandboxed shell]
@@ -146,6 +147,31 @@ write_docx_file
 
 These tools can trigger n8n workflows, call external APIs, write files, or run local commands inside a restricted workspace.
 
+### Governance Policy
+
+Governance is local policy enforcement before MCP execution. It decides whether a proposed tool call is allowed, denied, or requires user approval.
+
+```text
+Model proposes MCP tool call
+PolicyEngine checks tool + arguments
+allow / approval_required / deny
+Only allowed calls reach MCP
+```
+
+The default policy is stored in `governance_policy.json`:
+
+```text
+email_process summary/urgent -> allow
+calendar_schedule -> approval required
+social_post -> approval required
+bash_execute -> approval required unless denied
+file writes -> allowed only inside configured workspace/output dirs
+dangerous shell patterns -> deny
+unknown tools -> deny
+```
+
+Every policy decision is saved into local run memory and emitted to Langfuse when tracing is enabled.
+
 ### Run Memory
 
 Each CLI run saves one structured JSON trace under `memory/runs/`.
@@ -159,6 +185,7 @@ available MCP tools
 planned tasks
 selected skills
 available tools per subagent
+policy decisions and approval status
 subagent statuses
 ReAct step history
 unsupported tasks
@@ -204,7 +231,7 @@ If Langfuse is not configured, the agent still runs normally and saves local tra
 
 ### Docker Sandbox
 
-Risky tools such as shell execution and file writes should run through the MCP server inside Docker.
+Risky tools such as shell execution and file writes should run through the MCP server inside Docker. The MCP server also enforces `MCP_WORKSPACE_DIR`, so file writes and shell working directories cannot escape the mounted workspace.
 
 The MCP container can be restricted with:
 
@@ -213,6 +240,7 @@ read-only filesystem
 limited mounted workspace
 no-new-privileges
 dropped Linux capabilities
+non-root user
 optional network isolation for local-only tools
 ```
 
@@ -280,6 +308,7 @@ python react_agent.py \
   --ollama-base-url http://localhost:11434 \
   --skills-dir skills \
   --memory-dir memory \
+  --governance-policy governance_policy.json \
   --mcp-server mcp_server.py \
   --max-subagent-steps 6
 ```
@@ -313,6 +342,22 @@ python react_agent.py \
   --disable-langfuse
 ```
 
+Disable governance for legacy behavior:
+
+```bash
+python react_agent.py \
+  --prompt "Summarize unread emails" \
+  --disable-governance
+```
+
+Auto-approve only tools listed in `safe_auto_approve_tools`:
+
+```bash
+python react_agent.py \
+  --prompt "Write a local report" \
+  --auto-approve-safe-tools
+```
+
 Dockerized MCP server:
 
 ```bash
@@ -323,7 +368,15 @@ python react_agent.py \
   --skills-dir skills \
   --memory-dir memory \
   --mcp-command docker \
-  --mcp-args run --rm -i react-mcp-server:latest
+  --mcp-args run --rm -i \
+    --read-only \
+    --security-opt no-new-privileges:true \
+    --cap-drop ALL \
+    --tmpfs /tmp \
+    -e MCP_WORKSPACE_DIR=/workspace \
+    -e N8N_WEBHOOK_BASE="$N8N_WEBHOOK_BASE" \
+    -v "$PWD/workspace:/workspace:rw" \
+    react-mcp-server:latest
 ```
 
 ## Environment
@@ -335,7 +388,9 @@ OLLAMA_MEDIUM_MODEL=llama3.1:8b
 OLLAMA_LARGE_MODEL=qwen2.5:14b
 SKILLS_DIR=skills
 MEMORY_DIR=memory
+GOVERNANCE_POLICY=governance_policy.json
 MCP_SERVER_PATH=mcp_server.py
+MCP_WORKSPACE_DIR=workspace
 N8N_WEBHOOK_BASE=https://your-n8n-domain/webhook
 LANGFUSE_PUBLIC_KEY=
 LANGFUSE_SECRET_KEY=
@@ -354,7 +409,8 @@ The intended implementation path is:
 4. Per-run memory traces
 5. Skill proposal generation from run experience
 6. Langfuse tracing across the agent lifecycle
-7. Docker-restricted MCP execution
+7. Governance checks before MCP execution
+8. Docker-restricted MCP execution
 ```
 
 ## Design Rule
@@ -362,6 +418,7 @@ The intended implementation path is:
 ```text
 Skills decide how to work.
 MCP performs actions.
+Governance controls whether actions are allowed.
 Langfuse observes the run.
 Docker contains risky execution.
 ```
