@@ -8,8 +8,37 @@ from xml.sax.saxutils import escape
 import requests
 from mcp.server.fastmcp import FastMCP
 
-# Base URL where n8n exposes webhook triggers
-N8N_WEBHOOK_BASE = "https://n8n-domain/webhook"
+# Base URL where n8n exposes webhook triggers.
+N8N_WEBHOOK_BASE = os.environ.get("N8N_WEBHOOK_BASE", "https://n8n-domain/webhook").rstrip("/")
+MCP_WORKSPACE_DIR = os.path.abspath(os.environ.get("MCP_WORKSPACE_DIR", "workspace"))
+DENIED_COMMAND_PATTERNS = [
+    "rm -rf",
+    "del ",
+    "format ",
+    "shutdown",
+    "curl | sh",
+    "wget | sh",
+]
+
+
+def workspace_path(path: str | None = None) -> str:
+    """
+    Resolves a path inside MCP_WORKSPACE_DIR and blocks path escapes.
+    """
+    base = os.path.abspath(MCP_WORKSPACE_DIR)
+    candidate = path or "."
+    target = os.path.abspath(candidate if os.path.isabs(candidate) else os.path.join(base, candidate))
+    if os.path.commonpath([base, target]) != base:
+        raise ValueError(f"Path escapes MCP workspace: {path}")
+    return target
+
+
+def command_denied(command: str) -> str | None:
+    normalized = " ".join(command.lower().split())
+    for pattern in DENIED_COMMAND_PATTERNS:
+        if pattern in normalized:
+            return pattern
+    return None
 
 def call_n8n(path: str, payload: dict[str, Any]) -> dict[str, Any]:
     """
@@ -78,7 +107,23 @@ def bash_execute(command: str, cwd: str | None = None, timeout_sec: int = 20) ->
     Executes a bash command and returns stdout/stderr/returncode.
     Useful for file navigation and local CLI automation tasks.
     """
-    target_cwd = os.path.abspath(cwd or os.getcwd())
+    denied_pattern = command_denied(command)
+    if denied_pattern:
+        return {
+            "ok": False,
+            "error": f"Command contains denied pattern: {denied_pattern}",
+            "command": command,
+        }
+
+    try:
+        target_cwd = workspace_path(cwd)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "error": str(exc),
+            "command": command,
+        }
+
     if not os.path.isdir(target_cwd):
         return {
             "ok": False,
@@ -120,8 +165,11 @@ def write_txt_file(path: str, content: str, append: bool = False) -> dict[str, A
     """
     Creates or updates a UTF-8 text file.
     """
-    abs_path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    try:
+        abs_path = workspace_path(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    os.makedirs(os.path.dirname(abs_path) or MCP_WORKSPACE_DIR, exist_ok=True)
     mode = "a" if append else "w"
     with open(abs_path, mode, encoding="utf-8") as file:
         file.write(content)
@@ -137,8 +185,11 @@ def write_markdown_file(path: str, content: str, append: bool = False) -> dict[s
     """
     Creates or updates a Markdown (.md) file.
     """
-    abs_path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    try:
+        abs_path = workspace_path(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    os.makedirs(os.path.dirname(abs_path) or MCP_WORKSPACE_DIR, exist_ok=True)
     mode = "a" if append else "w"
     with open(abs_path, mode, encoding="utf-8") as file:
         file.write(content)
@@ -154,8 +205,11 @@ def write_csv_file(path: str, rows: list[list[Any]], header: list[str] | None = 
     """
     Creates a CSV file from row data.
     """
-    abs_path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    try:
+        abs_path = workspace_path(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    os.makedirs(os.path.dirname(abs_path) or MCP_WORKSPACE_DIR, exist_ok=True)
     with open(abs_path, "w", encoding="utf-8", newline="") as file:
         writer = csv.writer(file)
         if header:
@@ -174,8 +228,11 @@ def write_json_file(path: str, data: Any, indent: int = 2) -> dict[str, Any]:
     """
     Creates a JSON file with pretty formatting.
     """
-    abs_path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    try:
+        abs_path = workspace_path(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    os.makedirs(os.path.dirname(abs_path) or MCP_WORKSPACE_DIR, exist_ok=True)
     with open(abs_path, "w", encoding="utf-8") as file:
         json.dump(data, file, ensure_ascii=False, indent=indent)
         file.write("\n")
@@ -190,8 +247,11 @@ def write_docx_file(path: str, title: str, paragraphs: list[str]) -> dict[str, A
     """
     Creates a minimal .docx file without external dependencies.
     """
-    abs_path = os.path.abspath(path)
-    os.makedirs(os.path.dirname(abs_path) or ".", exist_ok=True)
+    try:
+        abs_path = workspace_path(path)
+    except ValueError as exc:
+        return {"ok": False, "error": str(exc), "path": path}
+    os.makedirs(os.path.dirname(abs_path) or MCP_WORKSPACE_DIR, exist_ok=True)
 
     def to_paragraph_xml(text: str) -> str:
         return f"<w:p><w:r><w:t>{escape(text)}</w:t></w:r></w:p>"

@@ -7,4 +7,13 @@ RUN pip install --no-cache-dir -r /app/requirements.txt
 
 COPY mcp_server.py /app/mcp_server.py
 
+RUN addgroup --system agent && \
+    adduser --system --ingroup agent agent && \
+    mkdir -p /workspace && \
+    chown -R agent:agent /app /workspace
+
+ENV MCP_WORKSPACE_DIR=/workspace
+
+USER agent
+
 ENTRYPOINT ["python", "/app/mcp_server.py"]

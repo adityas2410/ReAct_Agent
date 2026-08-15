@@ -4,5 +4,17 @@ services:
       context: .
       dockerfile: Dockerfile.mcp
     image: react-mcp-server:latest
+    environment:
+      MCP_WORKSPACE_DIR: /workspace
+      N8N_WEBHOOK_BASE: ${N8N_WEBHOOK_BASE:-https://n8n-domain/webhook}
+    volumes:
+      - ./workspace:/workspace:rw
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     stdin_open: true
     tty: true
