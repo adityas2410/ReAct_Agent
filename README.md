@@ -144,6 +144,33 @@ skills/
 
 Skills do not duplicate MCP workflows. They teach the agent how to approach a task, choose fields, recover from errors, and decide when a tool call is needed.
 
+Example Skill:
+
+```markdown
+---
+name: email_reasoning
+description: Decide how to process email automation requests before calling the email MCP workflow.
+triggers: ["email", "emails", "inbox", "unread", "thread", "threads", "urgent", "follow-up", "followup"]
+tools: ["email_process", "daily_summary"]
+---
+
+# Email Reasoning
+
+1. Identify the requested email mode: summary, urgent, cleanup, or daily summary.
+2. Preserve user constraints such as date, unread-only, sender, urgency, or follow-up intent.
+3. Use `email_process` for targeted email operations.
+```
+
+How it is used:
+
+```text
+User prompt mentions unread emails
+SkillStore matches email triggers
+SubAgent receives email_reasoning in Relevant Skills
+Only email_process and daily_summary are exposed for that routed task
+Governance still checks the final MCP call before execution
+```
+
 ### MCP Tools
 
 MCP is the execution layer. The FastMCP server exposes tools such as:
@@ -188,6 +215,27 @@ unknown tools -> deny
 
 Every policy decision is saved into local run memory and emitted to Langfuse when tracing is enabled.
 
+Example blocked trace fragment:
+
+```json
+{
+  "action": {
+    "tool": "bash_execute",
+    "arguments": {
+      "command": "rm -rf workspace"
+    },
+    "reason": "clean old files"
+  },
+  "policy_decision": "deny",
+  "policy_reason": "Command contains denied pattern: rm -rf",
+  "approval_status": "not_required",
+  "blocked_tool_call": {
+    "tool": "bash_execute",
+    "reason": "Command contains denied pattern: rm -rf"
+  }
+}
+```
+
 ### Run Memory
 
 Each CLI run saves one structured JSON trace under `memory/runs/`.
@@ -224,6 +272,28 @@ The agent does not blindly rewrite its own Skills. Instead, each run can produce
 ```
 
 Unsupported tasks automatically create `missing_capability` proposals. Normal runs may create `skill_update` proposals when the local model finds reusable learning in the trace. Approved `skill_update` proposals append to `## Learned Updates` in the target Skill. Approved `missing_capability` proposals create a new `skills/<capability>/SKILL.md` stub. Rejected proposals are removed instead of accumulating.
+
+Example proposal:
+
+```json
+{
+  "type": "missing_capability",
+  "skill": "flight",
+  "reason": "User requested flight booking, but no matching Skill or MCP tool exists.",
+  "suggested_change": "Add a flight planning Skill and MCP coverage for searching flights before booking.",
+  "source_run": "memory/runs/run_20260815T061500000000Z.json",
+  "status": "proposed"
+}
+```
+
+Approval behavior:
+
+```text
+Apply this Skill change now? [y/N]:
+y -> create or update the target SKILL.md
+n -> delete the proposal JSON
+EOF/no input -> delete the proposal JSON
+```
 
 ### Langfuse Observability
 
@@ -325,6 +395,20 @@ calendar task -> calendar_reasoning Skill -> calendar_schedule MCP tool
 governance -> email summary allowed, calendar scheduling asks approval
 memory -> saves selected Skills, tool calls, policy decisions, final answer
 Langfuse -> records the same lifecycle when configured
+```
+
+Example subagent result shape:
+
+```json
+{
+  "agent_type": "calendar",
+  "instruction": "Schedule follow-up reminders tomorrow at 10am.",
+  "complexity": "medium",
+  "selected_skills": ["calendar_reasoning"],
+  "available_tools": ["calendar_schedule"],
+  "status": "completed",
+  "result": "Follow-up reminder scheduled for tomorrow at 10am."
+}
 ```
 
 ### Unsupported Capability Becomes a Skill Proposal
